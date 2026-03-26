@@ -23,8 +23,7 @@ frontend/build/
 # IDE
 .vscode/
 .idea/
-.claude/*
-!.claude/skills/
+.claude/
 # macOS
 .DS_Store
 

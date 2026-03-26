@@ -120,6 +120,6 @@ docker build -t ccodebox-cc:latest -f images/claude-code/Dockerfile .
 
 ## 隐式契约防御
 
-**必读**：`.claude/skills/implicit-contract-defense/SKILL.md`
+**必读**：[ImplicitContractDefense.md](./ImplicitContractDefense.md)
 
-所有跨边界交互（前后端、数据库、外部输入）必须收敛到隔离仓。开发前先读 skill，每次改完跑 `check_contracts.sh` 验证。
+所有跨边界交互（前后端、数据库、外部输入）必须收敛到隔离仓。开发前先读，每次改完跑 `scripts/check_contracts.sh` 验证。
