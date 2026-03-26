@@ -81,7 +81,7 @@ npm run dev  # 默认 :3001
 
 # 构建 agent 镜像
 docker build -t ccodebox-base:latest -f images/base/Dockerfile images/base/
-docker build -t ccodebox-cc:latest -f images/claude-code/Dockerfile images/claude-code/
+docker build -t ccodebox-cc:latest -f images/claude-code/Dockerfile .
 ```
 
 ## 代码规范
@@ -110,3 +110,16 @@ docker build -t ccodebox-cc:latest -f images/claude-code/Dockerfile images/claud
 3. **每步都验证** — 改完 Rust 跑 `cargo check && cargo clippy`，改完前端跑 `npm run build`
 4. **删掉不用的代码** — 不留注释掉的代码块
 5. **一次只做一件事** — 按 Exec Plan 的步骤顺序执行，不跳步
+
+# 开发规范
+## TDD开发流程
+1. 先写测试（按功能模块粒度，不是单函数），跑 `cargo test` 确认编译通过但断言失败
+2. 实现代码，跑 `cargo test` 确认绿灯
+3. 需要时重构，保持绿灯
+4. 测试必须覆盖实际代码路径，不是理想调用方式
+
+## 隐式契约防御
+
+**必读**：`.claude/skills/implicit-contract-defense/SKILL.md`
+
+所有跨边界交互（前后端、数据库、外部输入）必须收敛到隔离仓。开发前先读 skill，每次改完跑 `check_contracts.sh` 验证。

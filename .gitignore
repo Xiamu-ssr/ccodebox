@@ -1,0 +1,32 @@
+# Rust
+backend/target/
+
+# ts-rs intermediate output (authoritative copy is frontend/src/lib/generated/)
+backend/bindings/
+
+# SQLite database
+backend/data/
+
+# Node.js / Next.js
+frontend/node_modules/
+frontend/.next/
+frontend/out/
+frontend/build/
+
+# Environment variables
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+
+# IDE
+.vscode/
+.idea/
+.claude/*
+!.claude/skills/
+# macOS
+.DS_Store
+
+# Logs
+*.log
