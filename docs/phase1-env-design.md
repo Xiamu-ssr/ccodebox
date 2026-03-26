@@ -101,39 +101,25 @@ agent-browser close                # 关闭浏览器
 
 ### 3.2 网页搜索（Tavily）
 
-**scripts/tavily-search**（装到镜像的 /usr/local/bin/）：
+**scripts/tavily-search**（纯 Python，零外部依赖，装到镜像的 /usr/local/bin/）：
+
+已存在于 `scripts/tavily-search`，支持多种输出格式：
 
 ```bash
-#!/bin/bash
-# tavily-search — 网页搜索 CLI
-# 用法: tavily-search "your query"
-# 需要环境变量: TAVILY_API_KEY
+# 基本搜索（JSON 输出）
+tavily-search --query "playwright headless browser"
 
-set -euo pipefail
+# Markdown 格式（适合 agent 阅读）
+tavily-search --query "React hydration error" --format md
 
-if [ -z "${1:-}" ]; then
-    echo "用法: tavily-search \"your query\""
-    exit 1
-fi
+# 包含 AI 摘要
+tavily-search --query "Rust vs Go performance" --include-answer --format md
 
-if [ -z "${TAVILY_API_KEY:-}" ]; then
-    echo "错误: TAVILY_API_KEY 未设置"
-    exit 1
-fi
-
-curl -s https://api.tavily.com/search \
-    -H "Content-Type: application/json" \
-    -d "{\"query\":\"$1\",\"api_key\":\"$TAVILY_API_KEY\",\"max_results\":5}" \
-    | python3 -c "
-import sys, json
-data = json.load(sys.stdin)
-for i, r in enumerate(data.get('results', []), 1):
-    print(f'{i}. {r[\"title\"]}')
-    print(f'   {r[\"url\"]}')
-    print(f'   {r[\"content\"][:200]}')
-    print()
-"
+# 深度搜索
+tavily-search --query "SeaORM entity first" --search-depth advanced
 ```
+
+API key 从环境变量 `TAVILY_API_KEY` 读取，由平台配置中心注入，不硬编码到脚本。
 
 **Dockerfile 安装**：
 
@@ -209,8 +195,11 @@ system-rules.md 中的工具说明段落：
 - 关闭：`agent-browser close`
 - 完整文档：`agent-browser --help`
 
-### 网页搜索
-- `tavily-search "你的查询"` 返回 Top 5 搜索结果
+### 网页搜索（tavily-search）
+- 基本搜索：`tavily-search --query "你的查询"` 返回 JSON
+- 可读格式：`tavily-search --query "你的查询" --format md`
+- 含 AI 摘要：`tavily-search --query "你的查询" --include-answer --format md`
+- 深度搜索：`tavily-search --query "你的查询" --search-depth advanced`
 ```
 
 所有 agent（CC、Codex、未来的 OpenCode 等）都看同一段文字，都通过 bash 调用。零配置差异。
