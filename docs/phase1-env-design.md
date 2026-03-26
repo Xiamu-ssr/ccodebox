@@ -16,7 +16,7 @@
 │     claude-code 或 codex                     │
 ├─────────────────────────────────────────────┤
 │ L2: 可选能力（构建时内置，默认全开）           │
-│     浏览器（Playwright + Chromium）           │
+│     浏览器（agent-browser CLI + Chromium）    │
 │     外搜（tavily-search CLI）                │
 │     未来可扩展：rust, go, database ...        │
 ├─────────────────────────────────────────────┤
@@ -68,60 +68,36 @@ RUN pip3 install --break-system-packages \
 
 ## 三、L2 内置能力
 
-### 3.1 浏览器操作（Playwright + Chromium）
+### 3.1 浏览器操作（agent-browser）
+
+使用 [agent-browser](https://github.com/vercel-labs/agent-browser)——专为 AI agent 设计的浏览器 CLI。基于 Playwright，提供 AX Tree（snapshot）、截图、点击/输入等完整操作，全部通过 CLI 命令完成，无需写脚本。
 
 **安装**（Dockerfile）：
 
 ```dockerfile
 # L2: 浏览器
-RUN npx playwright install --with-deps chromium
+RUN npm install -g agent-browser && agent-browser install --with-deps
 ```
 
-**Agent 怎么用**：Agent 直接写 Playwright 脚本执行。所有 agent 都能跑 bash，所以都能调 Playwright。
+**核心命令**：
 
-此外，提供两个薄封装 CLI 脚本简化常用操作：
-
-**scripts/ccodebox-browser**（装到镜像的 /usr/local/bin/）：
-
-```javascript
-#!/usr/bin/env node
-// ccodebox-browser — 浏览器快捷操作 CLI
-// 用法:
-//   ccodebox-browser snapshot <url>      → 输出 AX Tree（JSON）
-//   ccodebox-browser screenshot <url>    → 截图保存到 .loop/screenshots/
-
-const { chromium } = require('playwright');
-const fs = require('fs');
-const path = require('path');
-
-const [,, command, url] = process.argv;
-
-(async () => {
-    const browser = await chromium.launch({ headless: true });
-    const page = await browser.newPage();
-    await page.goto(url, { waitUntil: 'networkidle' });
-
-    if (command === 'snapshot') {
-        const tree = await page.accessibility.snapshot();
-        console.log(JSON.stringify(tree, null, 2));
-    } else if (command === 'screenshot') {
-        const dir = '.loop/screenshots';
-        fs.mkdirSync(dir, { recursive: true });
-        const file = path.join(dir, `${Date.now()}.png`);
-        await page.screenshot({ path: file, fullPage: true });
-        console.log(`Screenshot saved: ${file}`);
-    }
-
-    await browser.close();
-})();
+```bash
+agent-browser open <url>           # 导航到页面
+agent-browser snapshot -i          # AX Tree（只含可交互元素，带 @ref 引用）
+agent-browser snapshot -i --json   # AX Tree JSON 格式
+agent-browser screenshot page.png  # 截图
+agent-browser screenshot --full    # 全页截图
+agent-browser click @e1            # 点击元素（ref 来自 snapshot）
+agent-browser fill @e2 "text"      # 输入文本
+agent-browser wait --load networkidle  # 等待页面加载
+agent-browser close                # 关闭浏览器
 ```
 
-**Dockerfile 安装**：
-
-```dockerfile
-COPY scripts/ccodebox-browser /usr/local/bin/ccodebox-browser
-RUN chmod +x /usr/local/bin/ccodebox-browser
-```
+**为什么选 agent-browser 而不是 Playwright CLI**：
+- Playwright CLI 无 AX Tree 命令，需要写脚本；agent-browser 一行 `snapshot -i` 搞定
+- agent-browser 的 `@ref` 系统专为 agent 设计：snapshot 返回元素引用，后续操作直接用引用
+- 所有操作都是 CLI 命令，agent 通过 bash 调用，不需要写代码
+- 支持 `--json` 输出，方便 agent 解析
 
 ### 3.2 网页搜索（Tavily）
 
@@ -221,11 +197,20 @@ system-rules.md 中的工具说明段落：
 
 ```markdown
 ## 可用工具
-- 浏览器操作：容器内已安装 Playwright + Chromium（headless 模式）
-  - 写 Node.js 或 Python 脚本调用 Playwright API 进行完整的浏览器自动化
-  - 快捷命令：`ccodebox-browser snapshot <url>` 获取页面 AX Tree（JSON 格式）
-  - 快捷命令：`ccodebox-browser screenshot <url>` 截图保存到 .loop/screenshots/
-- 网页搜索：`tavily-search "你的查询"` 返回 Top 5 搜索结果
+
+### 浏览器操作（agent-browser）
+容器内已安装 agent-browser + Chromium（headless 模式）。
+- 打开页面：`agent-browser open <url>`
+- 获取页面结构：`agent-browser snapshot -i`（返回可交互元素列表，每个元素有 @ref 引用）
+- 截图：`agent-browser screenshot <filename>`
+- 点击：`agent-browser click @e1`（@e1 来自 snapshot 输出）
+- 输入：`agent-browser fill @e2 "text"`
+- 等待加载：`agent-browser wait --load networkidle`
+- 关闭：`agent-browser close`
+- 完整文档：`agent-browser --help`
+
+### 网页搜索
+- `tavily-search "你的查询"` 返回 Top 5 搜索结果
 ```
 
 所有 agent（CC、Codex、未来的 OpenCode 等）都看同一段文字，都通过 bash 调用。零配置差异。
@@ -319,9 +304,8 @@ async fn build_env_vars(&self, task: &Task) -> Vec<String> {
 
 ## 八、CC 执行顺序
 
-1. 重写 `images/base/Dockerfile`（bookworm + L2 能力 + CLI 工具脚本）
-2. 创建 `scripts/ccodebox-browser`（浏览器 CLI 封装）
-3. 创建 `scripts/tavily-search`（搜索 CLI 封装）
+1. 重写 `images/base/Dockerfile`（bookworm + L2 能力：agent-browser + tavily-search）
+2. 创建 `scripts/tavily-search`（搜索 CLI 封装）
 4. 更新 `images/claude-code/Dockerfile`（基于新 base）
 5. 创建 `images/codex/Dockerfile`
 6. 更新 `scripts/system-rules.md`（加入可用工具说明）
