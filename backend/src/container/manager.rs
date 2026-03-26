@@ -6,22 +6,46 @@ use bollard::container::{
 use bollard::Docker;
 use futures_util::StreamExt;
 
-use crate::models::settings::PlatformConfig;
-use crate::models::task::{AgentType, ContainerReport, Task};
+use crate::config::PlatformConfig;
+use crate::contracts::AgentType;
+use crate::entity::task;
+
+/// report.json produced by entrypoint.sh inside the container (new format)
+#[derive(Debug, serde::Deserialize)]
+pub struct ContainerReport {
+    pub agent_exit_code: i32,
+    pub has_summary: bool,
+    pub files_changed: Vec<String>,
+    pub branch: String,
+    pub duration_seconds: i32,
+    pub lines_added: i32,
+    pub lines_removed: i32,
+    pub model: String,
+    #[serde(default)]
+    pub pushed: bool,
+}
 
 /// Abstraction over container runtime for testability.
+/// `env_config` carries dynamic config from platform_config DB table.
 #[async_trait]
 pub trait ContainerRuntime: Send + Sync + 'static {
-    /// Create, start, wait, collect results, remove container.
-    /// Returns (exit_code, report, summary, diff_patch, logs).
     async fn run_task(
         &self,
-        task: &Task,
+        task: &task::Model,
         config: &PlatformConfig,
+        env_config: &std::collections::HashMap<String, String>,
     ) -> Result<TaskRunResult>;
 
-    /// Kill and remove a running container.
     async fn cancel_container(&self, container_id: &str) -> Result<()>;
+
+    async fn check_image_status(
+        &self,
+        config: &PlatformConfig,
+    ) -> Result<Vec<super::images::ImageStatus>>;
+
+    async fn build_all_images(&self, config: &PlatformConfig) -> Result<()>;
+
+    async fn ensure_images(&self, config: &PlatformConfig) -> Result<()>;
 }
 
 #[derive(Debug)]
@@ -31,7 +55,7 @@ pub struct TaskRunResult {
     pub report: Option<ContainerReport>,
     pub summary: Option<String>,
     pub diff_patch: Option<String>,
-    pub logs: Vec<String>,
+    pub agent_log: Option<String>,
 }
 
 // ── Bollard implementation ──
@@ -51,24 +75,52 @@ impl BollardRuntime {
 impl ContainerRuntime for BollardRuntime {
     async fn run_task(
         &self,
-        task: &Task,
+        task: &task::Model,
         config: &PlatformConfig,
+        env_config: &std::collections::HashMap<String, String>,
     ) -> Result<TaskRunResult> {
         let container_name = format!("ccodebox-{}", task.id);
 
         let image = match task.agent_type {
             AgentType::ClaudeCode => &config.cc_image,
-            AgentType::Codex => &config.cc_image, // TODO: codex image
+            AgentType::Codex => &config.codex_image,
         };
 
         let mut env = vec![
             format!("AGENT_TYPE={}", task.agent_type.as_str()),
             format!("TASK_PROMPT={}", task.prompt),
-            format!("MAX_ROUNDS={}", task.max_rounds),
-            format!("CC_MODEL={}", task.model),
-            format!("ANTHROPIC_BASE_URL={}", config.cc_api_base_url),
-            format!("ANTHROPIC_AUTH_TOKEN={}", config.cc_api_key),
+            format!("TASK_ID={}", task.id),
         ];
+
+        // Agent-specific env vars from DB config
+        match task.agent_type {
+            AgentType::ClaudeCode => {
+                env.push(format!("CC_MODEL={}", task.model));
+                if let Some(v) = env_config.get("agent.claude-code.api_base_url") {
+                    env.push(format!("ANTHROPIC_BASE_URL={v}"));
+                }
+                if let Some(v) = env_config.get("agent.claude-code.api_key") {
+                    env.push(format!("ANTHROPIC_AUTH_TOKEN={v}"));
+                }
+            }
+            AgentType::Codex => {
+                env.push(format!("CODEX_MODEL={}", task.model));
+                if let Some(v) = env_config.get("agent.codex.api_key") {
+                    env.push(format!("OPENAI_API_KEY={v}"));
+                }
+                if let Some(v) = env_config.get("agent.codex.api_base_url") {
+                    env.push(format!("OPENAI_BASE_URL={v}"));
+                }
+            }
+        }
+
+        // Shared tool keys
+        if let Some(v) = env_config.get("tool.tavily.api_key") {
+            env.push(format!("TAVILY_API_KEY={v}"));
+        }
+        if let Some(v) = env_config.get("git.github_token") {
+            env.push(format!("GITHUB_TOKEN={v}"));
+        }
 
         if let Some(ref repo_url) = task.repo_url {
             env.push(format!("REPO_URL={repo_url}"));
@@ -102,7 +154,9 @@ impl ContainerRuntime for BollardRuntime {
 
         let container_id = created.id.clone();
 
-        self.docker.start_container::<String>(&container_id, None).await?;
+        self.docker
+            .start_container::<String>(&container_id, None)
+            .await?;
 
         // Wait for container to finish
         let mut wait_stream = self.docker.wait_container(
@@ -125,21 +179,26 @@ impl ContainerRuntime for BollardRuntime {
         }
 
         // Collect results from container
-        let report = self.copy_file_from_container(&container_id, "/workspace/.loop/report.json").await
+        let report = self
+            .copy_file_from_container(&container_id, "/workspace/.loop/report.json")
+            .await
             .ok()
             .and_then(|s| serde_json::from_str::<ContainerReport>(&s).ok());
 
-        let summary = self.copy_file_from_container(&container_id, "/workspace/.loop/summary.md").await.ok();
-        let diff_patch = self.copy_file_from_container(&container_id, "/workspace/.loop/diff.patch").await.ok();
+        let summary = self
+            .copy_file_from_container(&container_id, "/workspace/.loop/summary.md")
+            .await
+            .ok();
+        let diff_patch = self
+            .copy_file_from_container(&container_id, "/workspace/.loop/diff.patch")
+            .await
+            .ok();
 
-        // Collect round logs
-        let mut logs = Vec::new();
-        for round in 1..=task.max_rounds {
-            let path = format!("/workspace/.loop/agent-round-{round}.log");
-            if let Ok(log) = self.copy_file_from_container(&container_id, &path).await {
-                logs.push(log);
-            }
-        }
+        // Collect single agent log
+        let agent_log = self
+            .copy_file_from_container(&container_id, "/workspace/.loop/agent.log")
+            .await
+            .ok();
 
         // Remove container
         self.docker
@@ -159,7 +218,7 @@ impl ContainerRuntime for BollardRuntime {
             report,
             summary,
             diff_patch,
-            logs,
+            agent_log,
         })
     }
 
@@ -181,17 +240,36 @@ impl ContainerRuntime for BollardRuntime {
 
         Ok(())
     }
+
+    async fn check_image_status(
+        &self,
+        config: &PlatformConfig,
+    ) -> Result<Vec<super::images::ImageStatus>> {
+        super::images::check_image_status(&self.docker, config).await
+    }
+
+    async fn build_all_images(&self, config: &PlatformConfig) -> Result<()> {
+        super::images::build_all_images(&self.docker, config).await
+    }
+
+    async fn ensure_images(&self, config: &PlatformConfig) -> Result<()> {
+        super::images::ensure_images(&self.docker, config).await
+    }
 }
 
 impl BollardRuntime {
     async fn copy_file_from_container(&self, container_id: &str, path: &str) -> Result<String> {
         let bytes = self
             .docker
-            .download_from_container(container_id, Some(bollard::container::DownloadFromContainerOptions { path: path.to_string() }))
+            .download_from_container(
+                container_id,
+                Some(bollard::container::DownloadFromContainerOptions {
+                    path: path.to_string(),
+                }),
+            )
             .collect::<Vec<_>>()
             .await;
 
-        // bollard returns a tar archive — extract the file content
         let mut all_bytes = Vec::new();
         for chunk in bytes {
             all_bytes.extend_from_slice(&chunk?);
@@ -212,26 +290,19 @@ impl BollardRuntime {
 #[cfg(test)]
 pub mod tests {
     use super::*;
-    use std::sync::Mutex;
-    use uuid::Uuid;
 
     /// Mock implementation for testing
     pub struct MockRuntime {
-        pub run_results: Mutex<Vec<TaskRunResult>>,
-        pub cancel_calls: Mutex<Vec<String>>,
+        pub run_results: std::sync::Mutex<Vec<TaskRunResult>>,
+        pub cancel_calls: std::sync::Mutex<Vec<String>>,
     }
 
     impl MockRuntime {
         pub fn new() -> Self {
             Self {
-                run_results: Mutex::new(Vec::new()),
-                cancel_calls: Mutex::new(Vec::new()),
+                run_results: std::sync::Mutex::new(Vec::new()),
+                cancel_calls: std::sync::Mutex::new(Vec::new()),
             }
-        }
-
-        pub fn with_result(mut self, result: TaskRunResult) -> Self {
-            self.run_results.get_mut().unwrap().push(result);
-            self
         }
     }
 
@@ -239,28 +310,29 @@ pub mod tests {
     impl ContainerRuntime for MockRuntime {
         async fn run_task(
             &self,
-            _task: &Task,
+            _task: &task::Model,
             _config: &PlatformConfig,
+            _env_config: &std::collections::HashMap<String, String>,
         ) -> Result<TaskRunResult> {
             let mut results = self.run_results.lock().unwrap();
             if results.is_empty() {
                 Ok(TaskRunResult {
-                    container_id: format!("mock-container-{}", Uuid::new_v4()),
+                    container_id: format!("mock-container-{}", uuid::Uuid::new_v4()),
                     exit_code: 0,
                     report: Some(ContainerReport {
-                        verify_passed: true,
-                        rounds: 1,
-                        max_rounds: 3,
-                        agent_type: "claude-code".into(),
-                        lint_status: "pass".into(),
-                        test_status: "pass".into(),
-                        files_changed: "main.py".into(),
+                        agent_exit_code: 0,
+                        has_summary: true,
+                        files_changed: vec!["main.py".into()],
+                        branch: "task-branch".into(),
+                        duration_seconds: 60,
                         lines_added: 10,
                         lines_removed: 2,
+                        model: "claude-sonnet-4-20250514".into(),
+                        pushed: false,
                     }),
                     summary: Some("Mock task completed.".into()),
                     diff_patch: Some("mock diff".into()),
-                    logs: vec!["Round 1: mock output".into()],
+                    agent_log: Some("Mock agent output".into()),
                 })
             } else {
                 Ok(results.remove(0))
@@ -268,38 +340,59 @@ pub mod tests {
         }
 
         async fn cancel_container(&self, container_id: &str) -> Result<()> {
-            self.cancel_calls.lock().unwrap().push(container_id.to_string());
+            self.cancel_calls
+                .lock()
+                .unwrap()
+                .push(container_id.to_string());
+            Ok(())
+        }
+
+        async fn check_image_status(
+            &self,
+            config: &PlatformConfig,
+        ) -> Result<Vec<crate::container::images::ImageStatus>> {
+            Ok(vec![
+                crate::container::images::ImageStatus { name: "ccodebox-base:latest".into(), ready: true },
+                crate::container::images::ImageStatus { name: config.cc_image.clone(), ready: true },
+                crate::container::images::ImageStatus { name: config.codex_image.clone(), ready: true },
+            ])
+        }
+
+        async fn build_all_images(&self, _config: &PlatformConfig) -> Result<()> {
+            Ok(())
+        }
+
+        async fn ensure_images(&self, _config: &PlatformConfig) -> Result<()> {
             Ok(())
         }
     }
 
     #[tokio::test]
     async fn mock_runtime_returns_default_result() {
+        use crate::contracts::TaskStatus;
+
         let mock = MockRuntime::new();
         let config = PlatformConfig {
             cc_image: "test:latest".into(),
-            cc_api_base_url: "http://localhost".into(),
-            cc_api_key: "test-key".into(),
+            codex_image: "test-codex:latest".into(),
             container_memory_limit: 1024,
             container_cpu_quota: 100000,
             default_model: "test-model".into(),
-            max_rounds_limit: 3,
         };
 
-        let task = Task {
-            id: Uuid::new_v4(),
+        let task_model = task::Model {
+            id: uuid::Uuid::new_v4().to_string(),
             title: "test".into(),
             prompt: "do stuff".into(),
             repo_url: None,
             branch: None,
             agent_type: AgentType::ClaudeCode,
             model: "test-model".into(),
-            max_rounds: 3,
-            status: crate::models::task::TaskStatus::Pending,
+            status: TaskStatus::Pending,
             container_id: None,
-            rounds_used: 0,
-            lint_status: None,
-            test_status: None,
+            agent_exit_code: None,
+            duration_seconds: None,
+            pushed: false,
             lines_added: 0,
             lines_removed: 0,
             files_changed: None,
@@ -311,10 +404,11 @@ pub mod tests {
             finished_at: None,
         };
 
-        let result = mock.run_task(&task, &config).await.unwrap();
+        let env_config = std::collections::HashMap::new();
+        let result = mock.run_task(&task_model, &config, &env_config).await.unwrap();
         assert_eq!(result.exit_code, 0);
         assert!(result.report.is_some());
-        assert!(result.report.unwrap().verify_passed);
+        assert_eq!(result.report.unwrap().agent_exit_code, 0);
     }
 
     #[tokio::test]

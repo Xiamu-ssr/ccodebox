@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import type { Task } from "@/lib/generated/Task";
+import type { Task } from "@/lib/types.generated";
 import StatusBadge from "./StatusBadge";
 
 function formatTime(iso: string): string {
@@ -26,7 +26,7 @@ export default function TaskCard({ task }: { task: Task }) {
         </div>
         <div className="flex items-center gap-3 mt-3 text-xs text-text-secondary">
           <span className="font-mono">
-            {task.agent_type === "claude_code" ? "Claude Code" : task.agent_type}
+            {task.agent_type === "claude_code" ? "Claude Code" : task.agent_type === "codex" ? "Codex" : task.agent_type}
           </span>
           <span className="text-text-muted">|</span>
           <span className="font-mono">{task.model}</span>

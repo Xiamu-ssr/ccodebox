@@ -1,12 +1,12 @@
-# CCodeBoX — Claude Code Agent Image
+# CCodeBoX — Codex Agent Image
 # Built on top of base image
 #
 # Build from repo root:
-#   docker build -t ccodebox-cc:latest -f images/claude-code/Dockerfile .
+#   docker build -t ccodebox-codex:latest -f images/codex/Dockerfile .
 FROM ccodebox-base:latest
 
-# Install Claude Code CLI
-RUN npm install -g @anthropic-ai/claude-code
+# Install Codex CLI
+RUN npm install -g @openai/codex
 
 # Entry script + system rules (paths relative to repo root build context)
 COPY scripts/entrypoint.sh /entrypoint.sh

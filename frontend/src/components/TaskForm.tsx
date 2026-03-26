@@ -2,8 +2,7 @@
 
 import { useState, useEffect } from "react";
 import { useRouter } from "next/navigation";
-import type { SettingsResponse } from "@/lib/generated/SettingsResponse";
-import type { AgentType } from "@/lib/generated/AgentType";
+import type { SettingsResponse, AgentType } from "@/lib/types.generated";
 import { createTask, getSettings } from "@/lib/api";
 
 export default function TaskForm() {
@@ -18,8 +17,6 @@ export default function TaskForm() {
   const [branch, setBranch] = useState("");
   const [agentType, setAgentType] = useState<AgentType>("claude_code");
   const [model, setModel] = useState("");
-  const [maxRounds, setMaxRounds] = useState(3);
-
   useEffect(() => {
     getSettings().then((s) => {
       setSettings(s);
@@ -31,7 +28,6 @@ export default function TaskForm() {
   }, []);
 
   const selectedAgent = settings?.agents.find((a) => a.type === agentType);
-  const availableModels = selectedAgent?.models ?? [];
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
@@ -48,7 +44,6 @@ export default function TaskForm() {
         branch: branch.trim() || null,
         agent_type: agentType,
         model: model || null,
-        max_rounds: maxRounds,
       });
       router.push(`/tasks/${res.id}`);
     } catch (err) {
@@ -126,7 +121,7 @@ export default function TaskForm() {
       </div>
 
       {/* Agent + Model row */}
-      <div className="grid grid-cols-2 gap-4">
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
         <div>
           <label className="block text-sm font-medium text-text-primary mb-1.5">
             Agent
@@ -136,9 +131,9 @@ export default function TaskForm() {
             onChange={(e) => {
               const val = e.target.value as AgentType;
               setAgentType(val);
-              const agent = settings?.agents.find((a) => a.type === val);
-              if (agent && agent.models.length > 0) {
-                setModel(agent.models[0]);
+              // Reset model to default when switching agents
+              if (settings) {
+                setModel(settings.default_model);
               }
             }}
             className="w-full bg-bg-base border border-border rounded-md px-3 py-2 text-sm text-text-primary focus:outline-none focus:ring-2 focus:ring-primary/50 focus:border-primary"
@@ -155,37 +150,18 @@ export default function TaskForm() {
           <label className="block text-sm font-medium text-text-primary mb-1.5">
             Model
           </label>
-          <select
+          <input
+            type="text"
             value={model}
             onChange={(e) => setModel(e.target.value)}
-            className="w-full bg-bg-base border border-border rounded-md px-3 py-2 text-sm text-text-primary focus:outline-none focus:ring-2 focus:ring-primary/50 focus:border-primary"
-          >
-            {availableModels.map((m) => (
-              <option key={m} value={m}>
-                {m}
-              </option>
-            ))}
-          </select>
-        </div>
-      </div>
-
-      {/* Max Rounds */}
-      <div>
-        <label className="block text-sm font-medium text-text-primary mb-1.5">
-          Max Rounds:{" "}
-          <span className="text-primary font-mono">{maxRounds}</span>
-        </label>
-        <input
-          type="range"
-          min={1}
-          max={settings?.max_rounds_limit ?? 5}
-          value={maxRounds}
-          onChange={(e) => setMaxRounds(Number(e.target.value))}
-          className="w-full accent-primary"
-        />
-        <div className="flex justify-between text-xs text-text-muted mt-1">
-          <span>1</span>
-          <span>{settings?.max_rounds_limit ?? 5}</span>
+            placeholder={settings?.default_model ?? "Enter model name"}
+            className="w-full bg-bg-base border border-border rounded-md px-3 py-2 text-sm text-text-primary placeholder-text-muted focus:outline-none focus:ring-2 focus:ring-primary/50 focus:border-primary"
+          />
+          {selectedAgent && (
+            <p className="text-xs text-text-muted mt-1">
+              {selectedAgent.name} agent
+            </p>
+          )}
         </div>
       </div>
 

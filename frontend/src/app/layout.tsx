@@ -32,6 +32,12 @@ export default function RootLayout({
                   Tasks
                 </Link>
                 <Link
+                  href="/settings"
+                  className="text-sm text-text-secondary hover:text-text-primary transition-colors"
+                >
+                  Settings
+                </Link>
+                <Link
                   href="/tasks/new"
                   className="text-sm bg-primary hover:bg-primary-hover text-white px-3 py-1.5 rounded-md transition-colors"
                 >

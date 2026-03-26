@@ -1,13 +1,12 @@
-"use client";
+import TaskDetailClient from "./client";
 
-import { use } from "react";
-import TaskDetail from "@/components/TaskDetail";
+export async function generateStaticParams(): Promise<{ id: string }[]> {
+  return [{ id: "placeholder" }];
+}
 
-export default function TaskDetailPage({
-  params,
-}: {
+export default async function TaskDetailPage(props: {
   params: Promise<{ id: string }>;
 }) {
-  const { id } = use(params);
-  return <TaskDetail taskId={id} />;
+  const { id } = await props.params;
+  return <TaskDetailClient taskId={id} />;
 }

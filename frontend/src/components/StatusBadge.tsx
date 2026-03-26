@@ -1,6 +1,6 @@
 "use client";
 
-import type { TaskStatus } from "@/lib/generated/TaskStatus";
+import type { TaskStatus } from "@/lib/types.generated";
 
 const STATUS_STYLES: Record<
   TaskStatus,

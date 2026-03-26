@@ -2,8 +2,7 @@
 
 import { useEffect, useState, useCallback } from "react";
 import Link from "next/link";
-import type { Task } from "@/lib/generated/Task";
-import type { TaskStatus } from "@/lib/generated/TaskStatus";
+import type { Task, TaskStatus } from "@/lib/types.generated";
 import { listTasks } from "@/lib/api";
 import TaskCard from "@/components/TaskCard";
 

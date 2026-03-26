@@ -1,31 +1,4 @@
-# AGENTS.md — CCodeBoX 开发规范
-
-## 构建与验证
-
-```bash
-# 后端
-cd backend && cargo check && cargo clippy  # 0 warning
-cargo fmt                                   # 格式化
-cargo test                                  # 跑测试
-
-# 前端
-cd frontend && npm run build               # 编译检查
-```
-
-每次改完都跑上面的命令，不要等最后。
-
-## 代码规范
-
-### Rust
-- 错误处理：`anyhow::Result`（应用层）、`thiserror`（库层）
-- 异步用 tokio，不用 block_on
-- commit 格式：`type(scope): description`（feat/fix/refactor/docs/chore）
-- 不留 TODO 注释、不留注释掉的代码块
-
-### TypeScript
-- 严格模式（`strict: true`）
-- 组件用函数式 + hooks
-- API 调用统一走 `lib/api.ts`
+# 编码规范
 
 ## TDD 流程
 1. 先写测试（按功能模块粒度），跑 `cargo test` 确认编译通过但断言失败

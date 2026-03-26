@@ -1,9 +1,14 @@
-import type { Task } from "./generated/Task";
-import type { CreateTaskRequest } from "./generated/CreateTaskRequest";
-import type { CreateTaskResponse } from "./generated/CreateTaskResponse";
-import type { TaskListResponse } from "./generated/TaskListResponse";
-import type { TaskLogsResponse } from "./generated/TaskLogsResponse";
-import type { SettingsResponse } from "./generated/SettingsResponse";
+import type {
+  Task,
+  CreateTaskRequest,
+  CreateTaskResponse,
+  TaskListResponse,
+  TaskLogsResponse,
+  SettingsResponse,
+  ConfigItem,
+  TestResult,
+  AgentType,
+} from "./types.generated";
 
 const API_BASE = "/api";
 
@@ -60,4 +65,37 @@ export async function cancelTask(id: string): Promise<void> {
 
 export async function getSettings(): Promise<SettingsResponse> {
   return fetchJSON("/settings");
+}
+
+export async function updateSettings(
+  config: ConfigItem[]
+): Promise<void> {
+  await fetchJSON("/settings", {
+    method: "PUT",
+    body: JSON.stringify({ config }),
+  });
+}
+
+export async function testAgent(agentType: AgentType): Promise<TestResult> {
+  return fetchJSON("/settings/test-agent", {
+    method: "POST",
+    body: JSON.stringify({ agent_type: agentType }),
+  });
+}
+
+export async function testTool(tool: string): Promise<TestResult> {
+  return fetchJSON("/settings/test-tool", {
+    method: "POST",
+    body: JSON.stringify({ tool }),
+  });
+}
+
+export async function getImageStatus(): Promise<
+  { name: string; ready: boolean }[]
+> {
+  return fetchJSON("/settings/images");
+}
+
+export async function buildImages(): Promise<void> {
+  await fetch(`${API_BASE}/settings/images/build`, { method: "POST" });
 }

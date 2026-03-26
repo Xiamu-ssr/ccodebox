@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useEffect, useCallback } from "react";
-import type { Task } from "@/lib/generated/Task";
+import type { Task } from "@/lib/types.generated";
 import { getTask, cancelTask } from "@/lib/api";
 import StatusBadge from "./StatusBadge";
 import LogViewer from "./LogViewer";
@@ -161,9 +161,8 @@ function OverviewTab({ task }: { task: Task }) {
           Configuration
         </h3>
         <dl className="space-y-2 text-sm">
-          <InfoRow label="Agent" value={task.agent_type === "claude_code" ? "Claude Code" : task.agent_type} />
+          <InfoRow label="Agent" value={task.agent_type === "claude_code" ? "Claude Code" : task.agent_type === "codex" ? "Codex" : task.agent_type} />
           <InfoRow label="Model" value={task.model} mono />
-          <InfoRow label="Max Rounds" value={String(task.max_rounds)} />
           {task.repo_url && <InfoRow label="Repository" value={task.repo_url} mono />}
           {task.branch && <InfoRow label="Branch" value={task.branch} mono />}
         </dl>
@@ -185,28 +184,25 @@ function OverviewTab({ task }: { task: Task }) {
           Report
         </h3>
         <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
-          <StatCard label="Rounds Used" value={String(task.rounds_used)} sub={`of ${task.max_rounds}`} />
           <StatCard
-            label="Lint"
-            value={task.lint_status ?? "N/A"}
+            label="Exit Code"
+            value={task.agent_exit_code != null ? String(task.agent_exit_code) : "N/A"}
             color={
-              task.lint_status === "pass"
+              task.agent_exit_code === 0
                 ? "text-status-success"
-                : task.lint_status === "fail"
+                : task.agent_exit_code != null
                   ? "text-status-failed"
                   : "text-text-muted"
             }
           />
           <StatCard
-            label="Tests"
-            value={task.test_status ?? "N/A"}
-            color={
-              task.test_status === "pass"
-                ? "text-status-success"
-                : task.test_status === "fail"
-                  ? "text-status-failed"
-                  : "text-text-muted"
-            }
+            label="Duration"
+            value={task.duration_seconds != null ? `${task.duration_seconds}s` : "N/A"}
+          />
+          <StatCard
+            label="Pushed"
+            value={task.pushed ? "Yes" : "No"}
+            color={task.pushed ? "text-status-success" : "text-text-muted"}
           />
           <StatCard
             label="Changes"
@@ -214,6 +210,18 @@ function OverviewTab({ task }: { task: Task }) {
             sub={task.files_changed ? `${task.files_changed.split(",").filter(Boolean).length} files` : undefined}
           />
         </div>
+        {task.pushed && task.repo_url && task.branch && (
+          <div className="mt-3 text-sm">
+            <a
+              href={`${task.repo_url.replace(/\.git$/, "")}/tree/${task.branch}`}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="text-primary hover:underline"
+            >
+              View branch on remote
+            </a>
+          </div>
+        )}
       </div>
     </div>
   );

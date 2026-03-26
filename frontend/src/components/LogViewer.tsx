@@ -11,8 +11,8 @@ export default function LogViewer({
   isRunning: boolean;
 }) {
   const [logs, setLogs] = useState<string>("");
-  const [rounds, setRounds] = useState(0);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
   const containerRef = useRef<HTMLPreElement>(null);
   const autoScroll = useRef(true);
 
@@ -24,11 +24,14 @@ export default function LogViewer({
         const res = await getTaskLogs(taskId);
         if (!cancelled) {
           setLogs(res.logs);
-          setRounds(res.rounds);
+          setError(null);
           setLoading(false);
         }
-      } catch {
-        if (!cancelled) setLoading(false);
+      } catch (err) {
+        if (!cancelled) {
+          setError(err instanceof Error ? err.message : "Failed to load logs");
+          setLoading(false);
+        }
       }
     }
 
@@ -67,10 +70,18 @@ export default function LogViewer({
     );
   }
 
+  if (error) {
+    return (
+      <div className="text-center py-10 text-text-secondary text-sm">
+        {error.includes("404") ? "No logs for this task." : `Error loading logs: ${error}`}
+      </div>
+    );
+  }
+
   if (!logs) {
     return (
       <div className="text-center py-10 text-text-secondary text-sm">
-        No logs available yet.
+        {isRunning ? "Waiting for logs..." : "No logs available."}
       </div>
     );
   }
@@ -78,9 +89,7 @@ export default function LogViewer({
   return (
     <div>
       <div className="flex items-center justify-between mb-2">
-        <span className="text-xs text-text-secondary">
-          {rounds} round{rounds !== 1 ? "s" : ""}
-        </span>
+        <span className="text-xs text-text-secondary">Agent Log</span>
         {isRunning && (
           <span className="text-xs text-status-running flex items-center gap-1">
             <span className="w-1.5 h-1.5 bg-status-running rounded-full animate-pulse" />

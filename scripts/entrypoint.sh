@@ -4,19 +4,20 @@ set -uo pipefail
 # ===== Config (injected by orchestrator via env vars) =====
 AGENT_TYPE="${AGENT_TYPE:-claude-code}"
 TASK_PROMPT="${TASK_PROMPT:-}"
-MAX_ROUNDS="${MAX_ROUNDS:-3}"
+TASK_ID="${TASK_ID:-unknown}"
 
 LOOP_DIR="/workspace/.loop"
 mkdir -p "$LOOP_DIR"
 
+START_TIME=$(date +%s)
+
 echo "[loop] ========================================="
-echo "[loop] Loop POC — Agent Container"
+echo "[loop] CCodeBoX — Agent Container"
 echo "[loop] Agent: $AGENT_TYPE"
-echo "[loop] Max rounds: $MAX_ROUNDS"
+echo "[loop] Task ID: $TASK_ID"
 echo "[loop] ========================================="
 
 # ===== Phase 1: Setup =====
-# If REPO_URL is set, clone it. Otherwise work in /workspace directly.
 if [ -n "${REPO_URL:-}" ]; then
     echo "[loop] Cloning $REPO_URL ..."
     git clone "$REPO_URL" /workspace/repo
@@ -40,162 +41,141 @@ if [ -f "package.json" ]; then
     npm install 2>/dev/null
 fi
 
-# ===== Phase 2: Agent Loop =====
-# Build the full prompt with work rules
-FULL_PROMPT="$TASK_PROMPT
+# ===== Phase 2: Prompt Assembly =====
+SYSTEM_RULES=""
+if [ -f "/system-rules.md" ]; then
+    SYSTEM_RULES=$(cat /system-rules.md)
+fi
 
-=== 工作规则（必须遵守）===
-1. 完成编码后，运行项目的测试验证你的修改
-2. 确保所有测试通过
-3. 确保代码风格检查通过（如果有 ruff/eslint）
-4. 将你的工作摘要写入 .loop/summary.md，包括做了什么、为什么、遇到的问题
-5. 不要修改不相关的文件"
+AGENTS_MD=""
+if [ -f "AGENTS.md" ]; then
+    AGENTS_MD=$(cat AGENTS.md)
+fi
 
-ROUND=1
-VERIFY_PASSED=false
+FULL_PROMPT=""
+[ -n "$SYSTEM_RULES" ] && FULL_PROMPT="$SYSTEM_RULES
 
-while [ $ROUND -le $MAX_ROUNDS ]; do
-    echo ""
-    echo "[loop] ===== Round $ROUND / $MAX_ROUNDS ====="
-    echo "[loop] Running agent..."
-    
-    if [ "$AGENT_TYPE" = "claude-code" ]; then
-        claude --print \
-            --dangerously-skip-permissions \
-            --model "${CC_MODEL:-claude-sonnet-4-20250514}" \
-            "$FULL_PROMPT" \
-            > "$LOOP_DIR/agent-round-$ROUND.log" 2>&1
-        AGENT_EXIT=$?
-    else
-        echo "[loop] Unknown agent type: $AGENT_TYPE"
-        exit 1
-    fi
-    
-    echo "[loop] Agent exited with code: $AGENT_EXIT"
-    echo "[loop] Agent output (last 20 lines):"
-    tail -20 "$LOOP_DIR/agent-round-$ROUND.log"
-    
-    # ===== Phase 3: Wrapper Verification =====
-    echo ""
-    echo "[loop] ===== Verification ====="
-    
-    VERIFY_PASSED=true
-    LINT_STATUS="skipped"
-    TEST_STATUS="skipped"
-    
-    # L1: Lint (if ruff available and python files exist)
-    if command -v ruff &>/dev/null && ls *.py **/*.py 2>/dev/null | head -1 > /dev/null 2>&1; then
-        echo "[loop] Running ruff..."
-        if ruff check . > "$LOOP_DIR/lint.log" 2>&1; then
-            LINT_STATUS="pass"
-            echo "[loop] ✅ Lint passed"
-        else
-            LINT_STATUS="fail"
-            VERIFY_PASSED=false
-            echo "[loop] ❌ Lint failed"
-            tail -10 "$LOOP_DIR/lint.log"
-        fi
-    else
-        echo "[loop] ⬜ Lint skipped (no Python files or ruff)"
-    fi
-    
-    # L2: Unit Test
-    if [ -f "pytest.ini" ] || [ -f "pyproject.toml" ] || [ -d "tests" ]; then
-        echo "[loop] Running pytest..."
-        if pytest tests/ -v --tb=short > "$LOOP_DIR/test.log" 2>&1; then
-            TEST_STATUS="pass"
-            echo "[loop] ✅ Tests passed"
-        else
-            TEST_STATUS="fail"
-            VERIFY_PASSED=false
-            echo "[loop] ❌ Tests failed"
-            tail -20 "$LOOP_DIR/test.log"
-        fi
-    elif [ -f "package.json" ] && grep -q '"test"' package.json 2>/dev/null; then
-        echo "[loop] Running npm test..."
-        if npm test > "$LOOP_DIR/test.log" 2>&1; then
-            TEST_STATUS="pass"
-            echo "[loop] ✅ Tests passed"
-        else
-            TEST_STATUS="fail"
-            VERIFY_PASSED=false
-            echo "[loop] ❌ Tests failed"
-            tail -20 "$LOOP_DIR/test.log"
-        fi
-    else
-        echo "[loop] ⬜ Tests skipped (no test config found)"
-    fi
-    
-    # Check results
-    if [ "$VERIFY_PASSED" = true ]; then
-        echo ""
-        echo "[loop] ✅✅✅ All verifications passed on round $ROUND ✅✅✅"
-        break
-    fi
-    
-    if [ $ROUND -lt $MAX_ROUNDS ]; then
-        echo ""
-        echo "[loop] 🔄 Feeding errors back to agent for round $((ROUND + 1))..."
-        
-        ERROR_CONTEXT=""
-        [ -f "$LOOP_DIR/lint.log" ] && [ "$LINT_STATUS" = "fail" ] && \
-            ERROR_CONTEXT="$ERROR_CONTEXT\n=== Lint Errors ===\n$(tail -30 $LOOP_DIR/lint.log)"
-        [ -f "$LOOP_DIR/test.log" ] && [ "$TEST_STATUS" = "fail" ] && \
-            ERROR_CONTEXT="$ERROR_CONTEXT\n=== Test Errors ===\n$(tail -50 $LOOP_DIR/test.log)"
-        
-        FULL_PROMPT="上一轮的修改未通过验证，请修复以下错误：
-$ERROR_CONTEXT
+"
+[ -n "$AGENTS_MD" ] && FULL_PROMPT="${FULL_PROMPT}${AGENTS_MD}
 
-原始任务：
-$TASK_PROMPT
+"
+FULL_PROMPT="${FULL_PROMPT}${TASK_PROMPT}"
 
-=== 工作规则（必须遵守）===
-1. 只修复上面列出的错误，不要重写整个项目
-2. 修复后运行测试确认通过
-3. 更新 .loop/summary.md"
-    fi
-    
-    ROUND=$((ROUND + 1))
-done
+# ===== Phase 3: Run Agent =====
+echo "[loop] Running $AGENT_TYPE agent..."
 
-# ===== Phase 4: Collect Report =====
+AGENT_EXIT=1
+if [ "$AGENT_TYPE" = "claude-code" ]; then
+    claude --print \
+        --dangerously-skip-permissions \
+        --model "${CC_MODEL:-claude-sonnet-4-20250514}" \
+        "$FULL_PROMPT" \
+        > "$LOOP_DIR/agent.log" 2>&1
+    AGENT_EXIT=$?
+elif [ "$AGENT_TYPE" = "codex" ]; then
+    codex \
+        --model "${CODEX_MODEL:-o3-mini}" \
+        --quiet \
+        --full-auto \
+        "$FULL_PROMPT" \
+        > "$LOOP_DIR/agent.log" 2>&1
+    AGENT_EXIT=$?
+else
+    echo "[loop] Unknown agent type: $AGENT_TYPE"
+    exit 1
+fi
+
+echo "[loop] Agent exited with code: $AGENT_EXIT"
+echo "[loop] Agent output (last 20 lines):"
+tail -20 "$LOOP_DIR/agent.log"
+
+# ===== Phase 4: Collect =====
 echo ""
 echo "[loop] ===== Collecting Report ====="
 
-# Generate diff
+END_TIME=$(date +%s)
+DURATION=$((END_TIME - START_TIME))
+
+# Stage changes and generate diff
 git add -A 2>/dev/null
-git diff --cached > "$LOOP_DIR/diff.patch" 2>/dev/null
-CHANGED_FILES=$(git diff --cached --name-only 2>/dev/null | tr '\n' ', ')
+
+CHANGED_FILES_JSON="[]"
+CHANGED_LIST=$(git diff --cached --name-only 2>/dev/null)
+if [ -n "$CHANGED_LIST" ]; then
+    CHANGED_FILES_JSON=$(echo "$CHANGED_LIST" | jq -R -s 'split("\n") | map(select(length > 0))')
+    git diff --cached > "$LOOP_DIR/diff.patch" 2>/dev/null
+fi
+
 LINES_ADDED=$(git diff --cached --numstat 2>/dev/null | awk '{s+=$1}END{print s+0}')
 LINES_REMOVED=$(git diff --cached --numstat 2>/dev/null | awk '{s+=$2}END{print s+0}')
 
-# Write report
+HAS_SUMMARY=false
+[ -f "$LOOP_DIR/summary.md" ] && HAS_SUMMARY=true
+
+# Determine branch name
+CURRENT_BRANCH=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "")
+
+# Determine model used
+AGENT_MODEL=""
+if [ "$AGENT_TYPE" = "claude-code" ]; then
+    AGENT_MODEL="${CC_MODEL:-claude-sonnet-4-20250514}"
+elif [ "$AGENT_TYPE" = "codex" ]; then
+    AGENT_MODEL="${CODEX_MODEL:-o3-mini}"
+fi
+
+# Write report.json (new format)
 cat > "$LOOP_DIR/report.json" << REPORT_EOF
 {
-    "verify_passed": $VERIFY_PASSED,
-    "rounds": $ROUND,
-    "max_rounds": $MAX_ROUNDS,
-    "agent_type": "$AGENT_TYPE",
-    "lint_status": "$LINT_STATUS",
-    "test_status": "$TEST_STATUS",
-    "files_changed": "$CHANGED_FILES",
+    "agent_exit_code": $AGENT_EXIT,
+    "has_summary": $HAS_SUMMARY,
+    "files_changed": $CHANGED_FILES_JSON,
+    "branch": "$CURRENT_BRANCH",
+    "duration_seconds": $DURATION,
     "lines_added": $LINES_ADDED,
-    "lines_removed": $LINES_REMOVED
+    "lines_removed": $LINES_REMOVED,
+    "model": "$AGENT_MODEL"
 }
 REPORT_EOF
 
 echo "[loop] Report:"
 cat "$LOOP_DIR/report.json"
 
+# Commit changes
+if [ -n "$CHANGED_LIST" ]; then
+    git commit -m "ccodebox: task $TASK_ID" --allow-empty 2>/dev/null || true
+fi
+
+# Push if REPO_URL is set and GITHUB_TOKEN available
+PUSHED=false
+if [ -n "${REPO_URL:-}" ] && [ -n "${GITHUB_TOKEN:-}" ] && [ -n "$CHANGED_LIST" ]; then
+    echo "[loop] Pushing to remote..."
+    if git push origin HEAD 2>/dev/null; then
+        PUSHED=true
+        echo "[loop] Push succeeded"
+    else
+        echo "[loop] Push failed"
+    fi
+fi
+
+# Append pushed status to report
+python3 -c "
+import json
+with open('$LOOP_DIR/report.json') as f:
+    r = json.load(f)
+r['pushed'] = $( [ "$PUSHED" = true ] && echo 'True' || echo 'False' )
+with open('$LOOP_DIR/report.json', 'w') as f:
+    json.dump(r, f, indent=4)
+" 2>/dev/null || true
+
 echo ""
 echo "[loop] Files in .loop/:"
 ls -la "$LOOP_DIR/"
 
 echo ""
-if [ "$VERIFY_PASSED" = true ]; then
-    echo "[loop] 🎉 Task completed successfully!"
+if [ $AGENT_EXIT -eq 0 ]; then
+    echo "[loop] Task completed successfully!"
     exit 0
 else
-    echo "[loop] 💥 Task failed after $MAX_ROUNDS rounds"
-    exit 1
+    echo "[loop] Task failed (agent exit code: $AGENT_EXIT)"
+    exit $AGENT_EXIT
 fi
