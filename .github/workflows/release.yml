@@ -13,10 +13,11 @@ jobs:
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-latest
             artifact: ccodebox-linux-amd64
-          - target: aarch64-unknown-linux-gnu
-            os: ubuntu-latest
-            artifact: ccodebox-linux-arm64
-            use-cross: true
+          # TODO: re-enable after fixing cross-compilation for linux-arm64
+          # - target: aarch64-unknown-linux-gnu
+          #   os: ubuntu-latest
+          #   artifact: ccodebox-linux-arm64
+          #   use-cross: true
           - target: x86_64-apple-darwin
             os: macos-latest
             artifact: ccodebox-macos-amd64
@@ -72,6 +73,7 @@ jobs:
 
   release:
     needs: build
+    if: always() && contains(needs.build.result, 'success') || needs.build.result == 'success'
     runs-on: ubuntu-latest
     permissions:
       contents: write
