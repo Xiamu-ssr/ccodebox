@@ -199,7 +199,7 @@ magic_numbers=$(
 )
 
 if [ -n "$magic_numbers" ]; then
-    warn "疑似魔法数字（确认是否应提取到 $CONSTS_FILE）:"
+    warn "疑似魔法数字（确认是否应提取到 $CONSTS_FILE):"
     while IFS= read -r line; do yellow "     $line"; done <<< "$magic_numbers"
 else
     ok "未发现明显魔法数字"

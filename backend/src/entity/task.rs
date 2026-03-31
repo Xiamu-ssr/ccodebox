@@ -1,21 +1,17 @@
 //! # tasks 表 — 编码任务
 //!
 //! ## 业务规则
-//! - 一个 task 对应一次容器执行，容器内 agent 自主完成编码
+//! - 一个 task 对应一次或多次 stage 执行
 //! - prompt 是用户提交的原始需求，不可修改
 //!
 //! ## 状态流转
 //! Pending → Running → Success/Failed，Failed → Pending（重试）
-//! Running → Cancelled（需 kill 容器）
-//!
-//! ## 关联
-//! - container_id 关联 Docker/Podman 容器（逻辑外键，不建物理外键）
-//! - task_logs 表存储日志（has_one）
+//! Running → Cancelled
 
 use sea_orm::entity::prelude::*;
 use serde::{Deserialize, Serialize};
 
-use crate::contracts::{AgentType, TaskStatus};
+use crate::contracts::TaskStatus;
 
 #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel, Serialize, Deserialize)]
 #[sea_orm(table_name = "tasks")]
@@ -31,54 +27,23 @@ pub struct Model {
     #[sea_orm(column_type = "Text")]
     pub prompt: String,
 
-    /// 可选，要操作的 git 仓库地址
-    pub repo_url: Option<String>,
+    /// 关联项目 ID
+    pub project_id: Option<String>,
 
-    /// 可选，git 分支名
-    pub branch: Option<String>,
+    /// 任务类型模板名称
+    #[sea_orm(default_value = "single-stage")]
+    pub task_type: String,
 
-    /// Agent 类型：ClaudeCode / Codex
-    #[sea_orm(default_value = "claude-code")]
-    pub agent_type: AgentType,
+    /// 任务输入参数（JSON）
+    #[sea_orm(column_type = "Text", nullable)]
+    pub inputs: Option<String>,
 
-    /// LLM 模型名称
-    pub model: String,
+    /// 当前执行的 stage 名称
+    pub current_stage: Option<String>,
 
     /// 任务状态，变更前必须调用 TaskStatus::can_transition_to()
     #[sea_orm(default_value = "pending")]
     pub status: TaskStatus,
-
-    /// Docker/Podman 容器 ID
-    pub container_id: Option<String>,
-
-    /// agent 进程退出码
-    pub agent_exit_code: Option<i32>,
-
-    /// 任务执行耗时（秒）
-    pub duration_seconds: Option<i32>,
-
-    /// 是否已推送到远程仓库
-    #[sea_orm(default_value = false)]
-    pub pushed: bool,
-
-    /// 新增代码行数
-    #[sea_orm(default_value = 0)]
-    pub lines_added: i32,
-
-    /// 删除代码行数
-    #[sea_orm(default_value = 0)]
-    pub lines_removed: i32,
-
-    /// 变更的文件列表（逗号分隔）
-    pub files_changed: Option<String>,
-
-    /// agent 生成的摘要（summary.md 内容）
-    #[sea_orm(column_type = "Text", nullable)]
-    pub summary: Option<String>,
-
-    /// git diff 内容
-    #[sea_orm(column_type = "Text", nullable)]
-    pub diff_patch: Option<String>,
 
     /// 失败时的错误信息
     pub error: Option<String>,
@@ -94,15 +59,6 @@ pub struct Model {
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
-pub enum Relation {
-    #[sea_orm(has_one = "super::task_log::Entity")]
-    TaskLog,
-}
-
-impl Related<super::task_log::Entity> for Entity {
-    fn to() -> RelationDef {
-        Relation::TaskLog.def()
-    }
-}
+pub enum Relation {}
 
 impl ActiveModelBehavior for ActiveModel {}

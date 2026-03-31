@@ -7,7 +7,9 @@ use ts_rs::TS;
 
 // ── Enums (shared by API + entity) ──
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, EnumIter, DeriveActiveEnum, Serialize, Deserialize, TS)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, EnumIter, DeriveActiveEnum, Serialize, Deserialize, TS,
+)]
 #[ts(export)]
 #[sea_orm(rs_type = "String", db_type = "String(StringLen::N(20))")]
 #[serde(rename_all = "snake_case")]
@@ -33,7 +35,9 @@ impl std::fmt::Display for AgentType {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, EnumIter, DeriveActiveEnum, Serialize, Deserialize, TS)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, EnumIter, DeriveActiveEnum, Serialize, Deserialize, TS,
+)]
 #[ts(export)]
 #[sea_orm(rs_type = "String", db_type = "String(StringLen::N(20))")]
 #[serde(rename_all = "snake_case")]
@@ -63,6 +67,34 @@ impl TaskStatus {
     }
 }
 
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, EnumIter, DeriveActiveEnum, Serialize, Deserialize, TS,
+)]
+#[ts(export)]
+#[sea_orm(rs_type = "String", db_type = "String(StringLen::N(20))")]
+#[serde(rename_all = "snake_case")]
+pub enum StageRunStatus {
+    #[sea_orm(string_value = "pending")]
+    Pending,
+    #[sea_orm(string_value = "running")]
+    Running,
+    #[sea_orm(string_value = "success")]
+    Success,
+    #[sea_orm(string_value = "failed")]
+    Failed,
+}
+
+impl StageRunStatus {
+    pub fn can_transition_to(&self, next: &StageRunStatus) -> bool {
+        matches!(
+            (self, next),
+            (Self::Pending, Self::Running)
+                | (Self::Running, Self::Success)
+                | (Self::Running, Self::Failed)
+        )
+    }
+}
+
 // ── Task (API response) ──
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
@@ -71,20 +103,11 @@ pub struct Task {
     pub id: String,
     pub title: String,
     pub prompt: String,
-    pub repo_url: Option<String>,
-    pub branch: Option<String>,
-    pub agent_type: AgentType,
-    pub model: String,
+    pub project_id: Option<String>,
+    pub task_type: String,
+    pub inputs: Option<String>,
+    pub current_stage: Option<String>,
     pub status: TaskStatus,
-    pub container_id: Option<String>,
-    pub agent_exit_code: Option<i32>,
-    pub duration_seconds: Option<i32>,
-    pub pushed: bool,
-    pub lines_added: i32,
-    pub lines_removed: i32,
-    pub files_changed: Option<String>,
-    pub summary: Option<String>,
-    pub diff_patch: Option<String>,
     pub error: Option<String>,
     pub created_at: DateTime<Utc>,
     pub started_at: Option<DateTime<Utc>>,
@@ -97,23 +120,84 @@ impl From<crate::entity::task::Model> for Task {
             id: m.id,
             title: m.title,
             prompt: m.prompt,
-            repo_url: m.repo_url,
-            branch: m.branch,
-            agent_type: m.agent_type,
-            model: m.model,
+            project_id: m.project_id,
+            task_type: m.task_type,
+            inputs: m.inputs,
+            current_stage: m.current_stage,
             status: m.status,
-            container_id: m.container_id,
-            agent_exit_code: m.agent_exit_code,
-            duration_seconds: m.duration_seconds,
-            pushed: m.pushed,
-            lines_added: m.lines_added,
-            lines_removed: m.lines_removed,
-            files_changed: m.files_changed,
-            summary: m.summary,
-            diff_patch: m.diff_patch,
             error: m.error,
             created_at: m.created_at,
             started_at: m.started_at,
+            finished_at: m.finished_at,
+        }
+    }
+}
+
+// ── Project (API response) ──
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct Project {
+    pub id: String,
+    pub name: String,
+    pub repo_url: Option<String>,
+    pub local_path: Option<String>,
+    pub default_agent: Option<String>,
+    pub created_at: DateTime<Utc>,
+}
+
+impl From<crate::entity::project::Model> for Project {
+    fn from(m: crate::entity::project::Model) -> Self {
+        Self {
+            id: m.id,
+            name: m.name,
+            repo_url: m.repo_url,
+            local_path: m.local_path,
+            default_agent: m.default_agent,
+            created_at: m.created_at,
+        }
+    }
+}
+
+// ── StageRun (API response) ──
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct StageRun {
+    pub id: String,
+    pub task_id: String,
+    pub stage_name: String,
+    pub run_number: i32,
+    pub agent_type: String,
+    pub status: StageRunStatus,
+    pub workspace_path: Option<String>,
+    pub branch: Option<String>,
+    pub agent_exit_code: Option<i32>,
+    pub diff_patch: Option<String>,
+    pub summary: Option<String>,
+    pub error_report: Option<String>,
+    pub duration_seconds: Option<i32>,
+    pub created_at: DateTime<Utc>,
+    pub finished_at: Option<DateTime<Utc>>,
+}
+
+impl From<crate::entity::stage_run::Model> for StageRun {
+    fn from(m: crate::entity::stage_run::Model) -> Self {
+        Self {
+            id: m.id,
+            task_id: m.task_id,
+            stage_name: m.stage_name,
+            run_number: m.run_number,
+            agent_type: m.agent_type,
+            status: m.status,
+            workspace_path: m.workspace_path,
+            branch: m.branch,
+            agent_exit_code: m.agent_exit_code,
+            diff_patch: m.diff_patch,
+            summary: m.summary,
+            error_report: m.error_report,
+            duration_seconds: m.duration_seconds,
+            created_at: m.created_at,
             finished_at: m.finished_at,
         }
     }
@@ -126,10 +210,9 @@ impl From<crate::entity::task::Model> for Task {
 pub struct CreateTaskRequest {
     pub title: String,
     pub prompt: String,
-    pub repo_url: Option<String>,
-    pub branch: Option<String>,
-    pub agent_type: Option<AgentType>,
-    pub model: Option<String>,
+    pub project_id: Option<String>,
+    pub task_type: Option<String>,
+    pub inputs: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, TS)]
@@ -154,10 +237,29 @@ pub struct TaskListQuery {
     pub offset: Option<u64>,
 }
 
+#[derive(Debug, Deserialize, TS)]
+#[ts(export)]
+pub struct CreateProjectRequest {
+    pub name: String,
+    pub repo_url: Option<String>,
+    pub local_path: Option<String>,
+    pub default_agent: Option<String>,
+}
+
 #[derive(Debug, Serialize, Deserialize, TS)]
 #[ts(export)]
-pub struct TaskLogsResponse {
-    pub logs: String,
+pub struct ProjectListResponse {
+    pub projects: Vec<Project>,
+}
+
+/// POST /api/run — 单次 stage 执行请求
+#[derive(Debug, Deserialize, TS)]
+#[ts(export)]
+pub struct RunStageRequest {
+    pub project_id: String,
+    pub agent_type: AgentType,
+    pub prompt: String,
+    pub model: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
@@ -166,7 +268,7 @@ pub struct AgentInfo {
     #[serde(rename = "type")]
     pub agent_type: AgentType,
     pub name: String,
-    pub image: String,
+    pub installed: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]

@@ -6,26 +6,26 @@ use axum::response::IntoResponse;
 use axum::Json;
 use uuid::Uuid;
 
+use crate::adapter::AdapterRegistry;
 use crate::consts;
-use crate::container::manager::ContainerRuntime;
 use crate::contracts::{
-    ConfigItem, CreateTaskRequest, CreateTaskResponse, Task, TaskListQuery, TaskListResponse,
-    TaskLogsResponse, TaskStatus, TestAgentRequest, TestResult, TestToolRequest,
+    AgentType, ConfigItem, CreateTaskRequest, CreateTaskResponse, RunStageRequest, StageRun, Task,
+    TaskListQuery, TaskListResponse, TaskStatus, TestAgentRequest, TestResult, TestToolRequest,
     UpdateSettingsRequest,
 };
-use crate::db::{Database, TaskReportUpdate};
-use crate::entity::task;
+use crate::engine::stage::{StageExecParams, StageExecutor};
+use crate::workspace::WorkspaceManager;
 use crate::AppState;
 
 type AppResult<T> = Result<T, AppError>;
 
-pub async fn create_task<R: ContainerRuntime>(
-    State(state): State<Arc<AppState<R>>>,
+pub async fn create_task(
+    State(state): State<Arc<AppState>>,
     Json(req): Json<CreateTaskRequest>,
 ) -> AppResult<impl IntoResponse> {
     let model = state
         .db
-        .create_task(&req, &state.config.default_model)
+        .create_task(&req)
         .await
         .map_err(AppError::Internal)?;
 
@@ -35,120 +35,204 @@ pub async fn create_task<R: ContainerRuntime>(
         created_at: model.created_at,
     };
 
-    // Spawn async container execution
-    let task_id = model.id.clone();
-    let db = state.db.clone();
-    let runtime = state.runtime.clone();
-    let config = state.config.clone();
+    // For single-stage tasks with a project, spawn execution immediately
+    if req.project_id.is_some() {
+        let task_id = model.id.clone();
+        let state_clone = state.clone();
+        tokio::spawn(async move {
+            if let Err(e) = execute_task_stages(task_id, state_clone).await {
+                tracing::error!("Task execution failed: {e}");
+            }
+        });
+    }
+
+    Ok((StatusCode::CREATED, Json(response)))
+}
+
+/// 后台执行 task 的 stages
+async fn execute_task_stages(task_id: String, state: Arc<AppState>) -> anyhow::Result<()> {
+    // 更新 task 为 Running
+    state
+        .db
+        .update_task_status(&task_id, TaskStatus::Running, None)
+        .await?;
+
+    let task = state
+        .db
+        .get_task(&task_id)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("Task not found: {task_id}"))?;
+
+    let project_id = task
+        .project_id
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("Task has no project_id"))?;
+
+    let project = state
+        .db
+        .get_project(project_id)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("Project not found: {project_id}"))?;
+
+    let repo_path = project
+        .local_path
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("Project has no local_path"))?;
+
+    let env_config = state.db.get_all_config().await.unwrap_or_default();
+
+    let executor = StageExecutor {
+        db: state.db.clone(),
+        adapter_registry: AdapterRegistry::new(),
+        workspace_manager: WorkspaceManager::new(WorkspaceManager::default_base_dir()),
+    };
+
+    let agent_type = project
+        .default_agent
+        .as_deref()
+        .and_then(|s| serde_json::from_value::<AgentType>(serde_json::Value::String(s.into())).ok())
+        .unwrap_or(AgentType::ClaudeCode);
+
+    let result = executor
+        .execute(StageExecParams {
+            task_id: task_id.clone(),
+            project_name: project.name.clone(),
+            repo_path: repo_path.clone(),
+            stage_name: "coding".into(),
+            agent_type,
+            prompt: task.prompt.clone(),
+            model: None,
+            env_config,
+            needs_branch: true,
+        })
+        .await;
+
+    match result {
+        Ok(_) => {
+            state
+                .db
+                .update_task_status(&task_id, TaskStatus::Success, None)
+                .await?;
+        }
+        Err(e) => {
+            state
+                .db
+                .update_task_status(
+                    &task_id,
+                    TaskStatus::Failed,
+                    Some(&format!("{e}")),
+                )
+                .await?;
+        }
+    }
+
+    Ok(())
+}
+
+/// POST /api/run — 单 stage 直接运行（最简模式）
+pub async fn run_stage(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<RunStageRequest>,
+) -> AppResult<impl IntoResponse> {
+    let project = state
+        .db
+        .get_project(&req.project_id)
+        .await
+        .map_err(AppError::Internal)?
+        .ok_or(AppError::BadRequest(format!(
+            "Project not found: {}",
+            req.project_id
+        )))?;
+
+    let repo_path = project
+        .local_path
+        .as_ref()
+        .ok_or_else(|| AppError::BadRequest("Project has no local_path".into()))?
+        .clone();
+
+    // 创建一个 task 记录
+    let task = state
+        .db
+        .create_task(&CreateTaskRequest {
+            title: format!("Run: {}", truncate(&req.prompt, 50)),
+            prompt: req.prompt.clone(),
+            project_id: Some(req.project_id.clone()),
+            task_type: Some("single-stage".into()),
+            inputs: None,
+        })
+        .await
+        .map_err(AppError::Internal)?;
+
+    let response = CreateTaskResponse {
+        id: task.id.clone(),
+        status: task.status,
+        created_at: task.created_at,
+    };
+
+    let task_id = task.id.clone();
+    let prompt = req.prompt.clone();
+    let agent_type = req.agent_type;
+    let model = req.model.clone();
 
     tokio::spawn(async move {
-        execute_task(task_id, model, db, runtime, config).await;
+        // 更新 task 为 Running
+        let _ = state
+            .db
+            .update_task_status(&task_id, TaskStatus::Running, None)
+            .await;
+
+        let env_config = state.db.get_all_config().await.unwrap_or_default();
+
+        let executor = StageExecutor {
+            db: state.db.clone(),
+            adapter_registry: AdapterRegistry::new(),
+            workspace_manager: WorkspaceManager::new(WorkspaceManager::default_base_dir()),
+        };
+
+        let result = executor
+            .execute(StageExecParams {
+                task_id: task_id.clone(),
+                project_name: project.name.clone(),
+                repo_path,
+                stage_name: "coding".into(),
+                agent_type,
+                prompt,
+                model,
+                env_config,
+                needs_branch: true,
+            })
+            .await;
+
+        let (status, error) = match result {
+            Ok(_) => (TaskStatus::Success, None),
+            Err(e) => (TaskStatus::Failed, Some(format!("{e}"))),
+        };
+
+        let _ = state
+            .db
+            .update_task_status(&task_id, status, error.as_deref())
+            .await;
     });
 
     Ok((StatusCode::CREATED, Json(response)))
 }
 
-async fn execute_task<R: ContainerRuntime>(
-    task_id: String,
-    task_model: task::Model,
-    db: Database,
-    runtime: Arc<tokio::sync::Mutex<R>>,
-    config: crate::config::PlatformConfig,
-) {
-    // Update to running
-    if let Err(e) = db
-        .update_task_status(&task_id, TaskStatus::Running, None, None)
-        .await
-    {
-        tracing::error!("Failed to update task {task_id} to running: {e}");
-        return;
-    }
-
-    // Read dynamic config from DB
-    let env_config = db.get_all_config().await.unwrap_or_default();
-
-    // Run container
-    let result = {
-        let rt = runtime.lock().await;
-        rt.run_task(&task_model, &config, &env_config).await
-    };
-
-    match result {
-        Ok(run_result) => {
-            // Update container_id
-            let _ = db
-                .update_task_status(
-                    &task_id,
-                    TaskStatus::Running,
-                    Some(&run_result.container_id),
-                    None,
-                )
-                .await;
-
-            // Update report data
-            if let Some(ref report) = run_result.report {
-                let files_csv = if report.files_changed.is_empty() {
-                    None
-                } else {
-                    Some(report.files_changed.join(","))
-                };
-
-                let db_report = TaskReportUpdate {
-                    agent_exit_code: Some(report.agent_exit_code),
-                    duration_seconds: Some(report.duration_seconds),
-                    pushed: report.pushed,
-                    lines_added: report.lines_added,
-                    lines_removed: report.lines_removed,
-                    files_changed: files_csv,
-                    summary: run_result.summary.clone(),
-                    diff_patch: run_result.diff_patch.clone(),
-                };
-                let _ = db.update_task_report(&task_id, &db_report).await;
-            }
-
-            // Store agent log
-            if let Some(ref log) = run_result.agent_log {
-                let _ = db.update_task_logs(&task_id, log).await;
-            }
-
-            let status = if run_result.exit_code == 0 {
-                TaskStatus::Success
-            } else {
-                TaskStatus::Failed
-            };
-
-            let error = if run_result.exit_code != 0 {
-                Some(format!(
-                    "Container exited with code {}",
-                    run_result.exit_code
-                ))
-            } else {
-                None
-            };
-
-            let _ = db
-                .update_task_status(&task_id, status, None, error.as_deref())
-                .await;
-        }
-        Err(e) => {
-            tracing::error!("Container execution failed for task {task_id}: {e}");
-            let _ = db
-                .update_task_status(
-                    &task_id,
-                    TaskStatus::Failed,
-                    None,
-                    Some(&format!("Container error: {e}")),
-                )
-                .await;
-        }
+fn truncate(s: &str, max: usize) -> &str {
+    if s.len() <= max {
+        s
+    } else {
+        &s[..s.floor_char_boundary(max)]
     }
 }
 
-pub async fn list_tasks<R: ContainerRuntime>(
-    State(state): State<Arc<AppState<R>>>,
+pub async fn list_tasks(
+    State(state): State<Arc<AppState>>,
     Query(query): Query<TaskListQuery>,
 ) -> AppResult<Json<TaskListResponse>> {
-    let limit = query.limit.unwrap_or(consts::DEFAULT_PAGE_SIZE).min(consts::MAX_PAGE_SIZE);
+    let limit = query
+        .limit
+        .unwrap_or(consts::DEFAULT_PAGE_SIZE)
+        .min(consts::MAX_PAGE_SIZE);
     let offset = query.offset.unwrap_or(0);
 
     let status = query
@@ -174,8 +258,8 @@ pub async fn list_tasks<R: ContainerRuntime>(
     }))
 }
 
-pub async fn get_task<R: ContainerRuntime>(
-    State(state): State<Arc<AppState<R>>>,
+pub async fn get_task(
+    State(state): State<Arc<AppState>>,
     Path(id): Path<Uuid>,
 ) -> AppResult<Json<Task>> {
     let model = state
@@ -188,22 +272,44 @@ pub async fn get_task<R: ContainerRuntime>(
     Ok(Json(Task::from(model)))
 }
 
-pub async fn get_task_logs<R: ContainerRuntime>(
-    State(state): State<Arc<AppState<R>>>,
+pub async fn get_task_stages(
+    State(state): State<Arc<AppState>>,
     Path(id): Path<Uuid>,
-) -> AppResult<Json<TaskLogsResponse>> {
-    let logs = state
+) -> AppResult<Json<Vec<StageRun>>> {
+    // Verify task exists
+    state
         .db
-        .get_task_logs(&id.to_string())
+        .get_task(&id.to_string())
         .await
         .map_err(AppError::Internal)?
         .ok_or(AppError::NotFound)?;
 
-    Ok(Json(TaskLogsResponse { logs }))
+    let models = state
+        .db
+        .list_stage_runs_by_task(&id.to_string())
+        .await
+        .map_err(AppError::Internal)?;
+
+    let runs: Vec<StageRun> = models.into_iter().map(StageRun::from).collect();
+    Ok(Json(runs))
 }
 
-pub async fn cancel_task<R: ContainerRuntime>(
-    State(state): State<Arc<AppState<R>>>,
+pub async fn get_stage_run(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<Uuid>,
+) -> AppResult<Json<StageRun>> {
+    let model = state
+        .db
+        .get_stage_run(&id.to_string())
+        .await
+        .map_err(AppError::Internal)?
+        .ok_or(AppError::NotFound)?;
+
+    Ok(Json(StageRun::from(model)))
+}
+
+pub async fn cancel_task(
+    State(state): State<Arc<AppState>>,
     Path(id): Path<Uuid>,
 ) -> AppResult<StatusCode> {
     let model = state
@@ -217,14 +323,11 @@ pub async fn cancel_task<R: ContainerRuntime>(
         return Err(AppError::BadRequest("Task is not running".into()));
     }
 
-    if let Some(ref container_id) = model.container_id {
-        let rt = state.runtime.lock().await;
-        rt.cancel_container(container_id).await.ok();
-    }
+    // TODO: Phase C — kill running agent process
 
     state
         .db
-        .update_task_status(&id.to_string(), TaskStatus::Cancelled, None, None)
+        .update_task_status(&id.to_string(), TaskStatus::Cancelled, None)
         .await
         .map_err(AppError::Internal)?;
 
@@ -232,8 +335,8 @@ pub async fn cancel_task<R: ContainerRuntime>(
 }
 
 /// GET /api/settings — returns agent info + masked config from DB
-pub async fn get_settings<R: ContainerRuntime>(
-    State(state): State<Arc<AppState<R>>>,
+pub async fn get_settings(
+    State(state): State<Arc<AppState>>,
 ) -> AppResult<Json<crate::contracts::SettingsResponse>> {
     let items = state
         .db
@@ -257,12 +360,19 @@ pub async fn get_settings<R: ContainerRuntime>(
         })
         .collect();
 
-    Ok(Json(state.config.settings_response(masked)))
+    // Check agent installation status
+    let mut agent_status = Vec::new();
+    for (agent_type, adapter) in state.adapter_registry.all() {
+        let installed = adapter.check_installed().await.unwrap_or(false);
+        agent_status.push((*agent_type, installed));
+    }
+
+    Ok(Json(state.config.settings_response(masked, agent_status)))
 }
 
 /// PUT /api/settings — batch update config
-pub async fn update_settings<R: ContainerRuntime>(
-    State(state): State<Arc<AppState<R>>>,
+pub async fn update_settings(
+    State(state): State<Arc<AppState>>,
     Json(req): Json<UpdateSettingsRequest>,
 ) -> AppResult<StatusCode> {
     for item in &req.config {
@@ -276,8 +386,8 @@ pub async fn update_settings<R: ContainerRuntime>(
 }
 
 /// POST /api/settings/test-agent — test agent API key
-pub async fn test_agent<R: ContainerRuntime>(
-    State(state): State<Arc<AppState<R>>>,
+pub async fn test_agent(
+    State(state): State<Arc<AppState>>,
     Json(req): Json<TestAgentRequest>,
 ) -> AppResult<Json<TestResult>> {
     let config = state.db.get_all_config().await.map_err(AppError::Internal)?;
@@ -307,7 +417,6 @@ pub async fn test_agent<R: ContainerRuntime>(
         }));
     }
 
-    // Simple HTTP test
     match test_api_key(&test_url, &api_key).await {
         Ok(()) => Ok(Json(TestResult {
             success: true,
@@ -321,22 +430,24 @@ pub async fn test_agent<R: ContainerRuntime>(
 }
 
 /// POST /api/settings/test-tool — test tool API key
-pub async fn test_tool<R: ContainerRuntime>(
-    State(state): State<Arc<AppState<R>>>,
+pub async fn test_tool(
+    State(state): State<Arc<AppState>>,
     Json(req): Json<TestToolRequest>,
 ) -> AppResult<Json<TestResult>> {
     let config = state.db.get_all_config().await.map_err(AppError::Internal)?;
 
     match req.tool.as_str() {
         "tavily" => {
-            let key = config.get("tool.tavily.api_key").cloned().unwrap_or_default();
+            let key = config
+                .get("tool.tavily.api_key")
+                .cloned()
+                .unwrap_or_default();
             if key.is_empty() {
                 return Ok(Json(TestResult {
                     success: false,
                     message: "No Tavily API key configured".into(),
                 }));
             }
-            // Test Tavily with a simple search
             let client = reqwest::Client::new();
             let resp = client
                 .post("https://api.tavily.com/search")
@@ -377,13 +488,8 @@ async fn test_api_key(url: &str, key: &str) -> Result<(), String> {
         .await
         .map_err(|e| e.to_string())?;
 
-    if resp.status().is_success() || resp.status().as_u16() == 401 {
-        // 401 means we reached the API, key format may be wrong but endpoint works
-        if resp.status().is_success() {
-            Ok(())
-        } else {
-            Err("API key rejected (401 Unauthorized)".into())
-        }
+    if resp.status().is_success() {
+        Ok(())
     } else {
         Err(format!("API returned status {}", resp.status()))
     }
@@ -396,35 +502,6 @@ fn mask_value(value: &str) -> String {
     let prefix = &value[..3];
     let suffix = &value[value.len() - 4..];
     format!("{prefix}***{suffix}")
-}
-
-/// GET /api/settings/images — check image build status
-pub async fn get_image_status<R: ContainerRuntime>(
-    State(state): State<Arc<AppState<R>>>,
-) -> AppResult<Json<Vec<crate::container::images::ImageStatus>>> {
-    let rt = state.runtime.lock().await;
-    let statuses = rt
-        .check_image_status(&state.config)
-        .await
-        .map_err(AppError::Internal)?;
-    Ok(Json(statuses))
-}
-
-/// POST /api/settings/images/build — trigger image builds (async, returns 202)
-pub async fn build_images<R: ContainerRuntime>(
-    State(state): State<Arc<AppState<R>>>,
-) -> AppResult<StatusCode> {
-    let runtime = state.runtime.clone();
-    let config = state.config.clone();
-
-    tokio::spawn(async move {
-        let rt = runtime.lock().await;
-        if let Err(e) = rt.build_all_images(&config).await {
-            tracing::error!("Image build failed: {e}");
-        }
-    });
-
-    Ok(StatusCode::ACCEPTED)
 }
 
 // ── Error handling ──
@@ -458,29 +535,23 @@ mod tests {
     use axum::http::{Request, StatusCode};
     use tower::ServiceExt;
 
+    use crate::adapter::AdapterRegistry;
     use crate::api;
     use crate::config::PlatformConfig;
-    use crate::container::manager::tests::MockRuntime;
     use crate::contracts::{CreateTaskResponse, TaskListResponse, UpdateSettingsRequest, ConfigItem};
     use crate::db::Database;
     use crate::AppState;
     use std::sync::Arc;
-    use tokio::sync::Mutex;
 
-    async fn test_app() -> (axum::Router, Arc<AppState<MockRuntime>>) {
+    async fn test_app() -> (axum::Router, Arc<AppState>) {
         let db = Database::new(":memory:").await.unwrap();
         db.migrate().await.unwrap();
-        let runtime = MockRuntime::new();
         let config = PlatformConfig {
-            cc_image: "test:latest".into(),
-            codex_image: "test-codex:latest".into(),
-            container_memory_limit: 1024,
-            container_cpu_quota: 100000,
             default_model: "test-model".into(),
         };
         let state = Arc::new(AppState {
             db,
-            runtime: Arc::new(Mutex::new(runtime)),
+            adapter_registry: AdapterRegistry::new(),
             config,
         });
         (api::router(state.clone()), state)
@@ -558,7 +629,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn settings_returns_agents_and_empty_config() {
+    async fn settings_returns_agents() {
         let (app, _) = test_app().await;
 
         let response = app
@@ -578,8 +649,9 @@ mod tests {
             .unwrap();
         let resp: crate::contracts::SettingsResponse = serde_json::from_slice(&body).unwrap();
         assert_eq!(resp.agents.len(), 2);
-        assert_eq!(resp.agents[0].name, "Claude Code");
-        assert_eq!(resp.agents[1].name, "Codex");
+        let names: Vec<&str> = resp.agents.iter().map(|a| a.name.as_str()).collect();
+        assert!(names.contains(&"Claude Code"));
+        assert!(names.contains(&"Codex"));
         assert!(resp.config.is_empty());
     }
 
@@ -587,11 +659,9 @@ mod tests {
     async fn put_settings_then_get_masked() {
         let (_, state) = test_app().await;
 
-        // Set config via DB directly
         state.db.set_config("agent.claude-code.api_key", "sk-ant-very-long-key-1234", true).await.unwrap();
         state.db.set_config("agent.claude-code.default_model", "sonnet", false).await.unwrap();
 
-        // GET settings — encrypted values should be masked
         let app = api::router(state.clone());
         let response = app
             .oneshot(
@@ -645,7 +715,6 @@ mod tests {
 
         assert_eq!(response.status(), StatusCode::OK);
 
-        // Verify in DB
         let val = state.db.get_config("agent.claude-code.api_key").await.unwrap();
         assert_eq!(val.as_deref(), Some("sk-new"));
         let val = state.db.get_config("tool.tavily.api_key").await.unwrap();

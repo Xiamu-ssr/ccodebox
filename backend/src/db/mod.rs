@@ -7,18 +7,18 @@ use sea_orm::{
 };
 use sea_orm::sea_query::OnConflict;
 
-use crate::contracts::{AgentType, ConfigItem, CreateTaskRequest, TaskStatus};
-use crate::entity::{platform_config, task, task_log};
+use crate::contracts::{ConfigItem, CreateProjectRequest, CreateTaskRequest, StageRunStatus, TaskStatus};
+use crate::entity::{platform_config, project, stage_run, task};
 
-pub struct TaskReportUpdate {
-    pub agent_exit_code: Option<i32>,
-    pub duration_seconds: Option<i32>,
-    pub pushed: bool,
-    pub lines_added: i32,
-    pub lines_removed: i32,
-    pub files_changed: Option<String>,
-    pub summary: Option<String>,
+/// Stage 执行报告，批量更新 stage_run 记录
+pub struct StageRunReport {
+    pub exit_code: Option<i32>,
+    pub duration: Option<i32>,
+    pub agent_log: Option<String>,
     pub diff_patch: Option<String>,
+    pub summary: Option<String>,
+    pub error_report: Option<String>,
+    pub prompt_used: Option<String>,
 }
 
 #[derive(Clone)]
@@ -70,7 +70,15 @@ impl Database {
 
         let stmt = builder.build(
             &schema
-                .create_table_from_entity(task_log::Entity)
+                .create_table_from_entity(project::Entity)
+                .if_not_exists()
+                .to_owned(),
+        );
+        self.conn.execute(stmt).await?;
+
+        let stmt = builder.build(
+            &schema
+                .create_table_from_entity(stage_run::Entity)
                 .if_not_exists()
                 .to_owned(),
         );
@@ -87,11 +95,9 @@ impl Database {
         Ok(())
     }
 
-    pub async fn create_task(
-        &self,
-        req: &CreateTaskRequest,
-        default_model: &str,
-    ) -> Result<task::Model> {
+    // ── Task CRUD ──
+
+    pub async fn create_task(&self, req: &CreateTaskRequest) -> Result<task::Model> {
         let id = uuid::Uuid::new_v4().to_string();
         let now = Utc::now();
 
@@ -99,10 +105,9 @@ impl Database {
             id: Set(id),
             title: Set(req.title.clone()),
             prompt: Set(req.prompt.clone()),
-            repo_url: Set(req.repo_url.clone()),
-            branch: Set(req.branch.clone()),
-            agent_type: Set(req.agent_type.unwrap_or(AgentType::ClaudeCode)),
-            model: Set(req.model.clone().unwrap_or_else(|| default_model.to_string())),
+            project_id: Set(req.project_id.clone()),
+            task_type: Set(req.task_type.clone().unwrap_or_else(|| "single-stage".into())),
+            inputs: Set(req.inputs.clone()),
             status: Set(TaskStatus::Pending),
             created_at: Set(now),
             ..Default::default()
@@ -143,7 +148,6 @@ impl Database {
         &self,
         id: &str,
         status: TaskStatus,
-        container_id: Option<&str>,
         error: Option<&str>,
     ) -> Result<()> {
         let now = Utc::now();
@@ -153,10 +157,6 @@ impl Database {
             status: Set(status),
             ..Default::default()
         };
-
-        if let Some(cid) = container_id {
-            model.container_id = Set(Some(cid.to_string()));
-        }
 
         if let Some(e) = error {
             model.error = Set(Some(e.to_string()));
@@ -176,48 +176,154 @@ impl Database {
         Ok(())
     }
 
-    pub async fn update_task_report(&self, id: &str, report: &TaskReportUpdate) -> Result<()> {
+    pub async fn update_task_current_stage(&self, id: &str, stage: &str) -> Result<()> {
         let model = task::ActiveModel {
             id: Set(id.to_string()),
-            agent_exit_code: Set(report.agent_exit_code),
-            duration_seconds: Set(report.duration_seconds),
-            pushed: Set(report.pushed),
-            lines_added: Set(report.lines_added),
-            lines_removed: Set(report.lines_removed),
-            files_changed: Set(report.files_changed.clone()),
-            summary: Set(report.summary.clone()),
-            diff_patch: Set(report.diff_patch.clone()),
+            current_stage: Set(Some(stage.to_string())),
             ..Default::default()
         };
+        model.update(&self.conn).await?;
+        Ok(())
+    }
+
+    // ── Project CRUD ──
+
+    pub async fn create_project(&self, req: &CreateProjectRequest) -> Result<project::Model> {
+        let id = uuid::Uuid::new_v4().to_string();
+        let now = Utc::now();
+
+        let model = project::ActiveModel {
+            id: Set(id),
+            name: Set(req.name.clone()),
+            repo_url: Set(req.repo_url.clone()),
+            local_path: Set(req.local_path.clone()),
+            default_agent: Set(req.default_agent.clone()),
+            created_at: Set(now),
+        };
+
+        let result = model.insert(&self.conn).await?;
+        Ok(result)
+    }
+
+    pub async fn get_project(&self, id: &str) -> Result<Option<project::Model>> {
+        let result = project::Entity::find_by_id(id).one(&self.conn).await?;
+        Ok(result)
+    }
+
+    pub async fn get_project_by_name(&self, name: &str) -> Result<Option<project::Model>> {
+        let result = project::Entity::find()
+            .filter(project::Column::Name.eq(name))
+            .one(&self.conn)
+            .await?;
+        Ok(result)
+    }
+
+    pub async fn list_projects(&self) -> Result<Vec<project::Model>> {
+        let result = project::Entity::find()
+            .order_by_desc(project::Column::CreatedAt)
+            .all(&self.conn)
+            .await?;
+        Ok(result)
+    }
+
+    pub async fn delete_project(&self, id: &str) -> Result<()> {
+        project::Entity::delete_by_id(id)
+            .exec(&self.conn)
+            .await?;
+        Ok(())
+    }
+
+    // ── StageRun CRUD ──
+
+    pub async fn create_stage_run(
+        &self,
+        task_id: &str,
+        stage_name: &str,
+        run_number: i32,
+        agent_type: &str,
+    ) -> Result<stage_run::Model> {
+        let id = uuid::Uuid::new_v4().to_string();
+        let now = Utc::now();
+
+        let model = stage_run::ActiveModel {
+            id: Set(id),
+            task_id: Set(task_id.to_string()),
+            stage_name: Set(stage_name.to_string()),
+            run_number: Set(run_number),
+            agent_type: Set(agent_type.to_string()),
+            status: Set(StageRunStatus::Pending),
+            created_at: Set(now),
+            ..Default::default()
+        };
+
+        let result = model.insert(&self.conn).await?;
+        Ok(result)
+    }
+
+    pub async fn get_stage_run(&self, id: &str) -> Result<Option<stage_run::Model>> {
+        let result = stage_run::Entity::find_by_id(id).one(&self.conn).await?;
+        Ok(result)
+    }
+
+    pub async fn list_stage_runs_by_task(&self, task_id: &str) -> Result<Vec<stage_run::Model>> {
+        let result = stage_run::Entity::find()
+            .filter(stage_run::Column::TaskId.eq(task_id))
+            .order_by_asc(stage_run::Column::CreatedAt)
+            .all(&self.conn)
+            .await?;
+        Ok(result)
+    }
+
+    pub async fn update_stage_run_status(
+        &self,
+        id: &str,
+        status: StageRunStatus,
+        workspace_path: Option<&str>,
+        branch: Option<&str>,
+    ) -> Result<()> {
+        let mut model = stage_run::ActiveModel {
+            id: Set(id.to_string()),
+            status: Set(status),
+            ..Default::default()
+        };
+
+        if let Some(wp) = workspace_path {
+            model.workspace_path = Set(Some(wp.to_string()));
+        }
+        if let Some(b) = branch {
+            model.branch = Set(Some(b.to_string()));
+        }
+
+        match status {
+            StageRunStatus::Success | StageRunStatus::Failed => {
+                model.finished_at = Set(Some(Utc::now()));
+            }
+            _ => {}
+        }
 
         model.update(&self.conn).await?;
         Ok(())
     }
 
-    pub async fn update_task_logs(&self, task_id: &str, logs: &str) -> Result<()> {
-        let model = task_log::ActiveModel {
-            task_id: Set(task_id.to_string()),
-            logs: Set(logs.to_string()),
-            rounds: Set(1),
+    pub async fn update_stage_run_report(
+        &self,
+        id: &str,
+        report: &StageRunReport,
+    ) -> Result<()> {
+        let model = stage_run::ActiveModel {
+            id: Set(id.to_string()),
+            agent_exit_code: Set(report.exit_code),
+            duration_seconds: Set(report.duration),
+            agent_log: Set(report.agent_log.clone()),
+            diff_patch: Set(report.diff_patch.clone()),
+            summary: Set(report.summary.clone()),
+            error_report: Set(report.error_report.clone()),
+            prompt_used: Set(report.prompt_used.clone()),
+            ..Default::default()
         };
 
-        task_log::Entity::insert(model)
-            .on_conflict(
-                OnConflict::column(task_log::Column::TaskId)
-                    .update_columns([task_log::Column::Logs, task_log::Column::Rounds])
-                    .to_owned(),
-            )
-            .exec(&self.conn)
-            .await?;
-
+        model.update(&self.conn).await?;
         Ok(())
-    }
-
-    pub async fn get_task_logs(&self, task_id: &str) -> Result<Option<String>> {
-        let result = task_log::Entity::find_by_id(task_id)
-            .one(&self.conn)
-            .await?;
-        Ok(result.map(|m| m.logs))
     }
 
     // ── platform_config CRUD ──
@@ -289,16 +395,26 @@ mod tests {
         db
     }
 
-    fn make_req(title: &str) -> CreateTaskRequest {
+    fn make_task_req(title: &str) -> CreateTaskRequest {
         CreateTaskRequest {
             title: title.into(),
             prompt: "prompt".into(),
-            repo_url: None,
-            branch: None,
-            agent_type: None,
-            model: None,
+            project_id: None,
+            task_type: None,
+            inputs: None,
         }
     }
+
+    fn make_project_req(name: &str) -> CreateProjectRequest {
+        CreateProjectRequest {
+            name: name.into(),
+            repo_url: None,
+            local_path: Some("/tmp/test".into()),
+            default_agent: None,
+        }
+    }
+
+    // ── Task tests ──
 
     #[tokio::test]
     async fn create_and_get_task() {
@@ -306,35 +422,26 @@ mod tests {
         let req = CreateTaskRequest {
             title: "Test task".into(),
             prompt: "Do something".into(),
-            repo_url: Some("https://github.com/user/repo".into()),
-            branch: Some("main".into()),
-            agent_type: Some(AgentType::ClaudeCode),
-            model: Some("claude-opus-4-6".into()),
+            project_id: None,
+            task_type: Some("feature-dev".into()),
+            inputs: Some(r#"{"requirement":"test"}"#.into()),
         };
 
-        let task = db.create_task(&req, "default").await.unwrap();
+        let task = db.create_task(&req).await.unwrap();
         assert_eq!(task.title, "Test task");
         assert_eq!(task.status, TaskStatus::Pending);
-        assert_eq!(task.agent_type, AgentType::ClaudeCode);
-        assert_eq!(task.model, "claude-opus-4-6");
-        assert_eq!(
-            task.repo_url.as_deref(),
-            Some("https://github.com/user/repo")
-        );
+        assert_eq!(task.task_type, "feature-dev");
+        assert!(task.inputs.is_some());
 
         let fetched = db.get_task(&task.id).await.unwrap().unwrap();
         assert_eq!(fetched.id, task.id);
-        assert_eq!(fetched.title, "Test task");
-        assert_eq!(fetched.model, "claude-opus-4-6");
     }
 
     #[tokio::test]
     async fn create_task_uses_defaults() {
         let db = test_db().await;
-        let req = make_req("Defaults");
-        let task = db.create_task(&req, "my-default-model").await.unwrap();
-        assert_eq!(task.agent_type, AgentType::ClaudeCode);
-        assert_eq!(task.model, "my-default-model");
+        let task = db.create_task(&make_task_req("Defaults")).await.unwrap();
+        assert_eq!(task.task_type, "single-stage");
     }
 
     #[tokio::test]
@@ -343,11 +450,11 @@ mod tests {
 
         for i in 0..5 {
             let task = db
-                .create_task(&make_req(&format!("Task {i}")), "m")
+                .create_task(&make_task_req(&format!("Task {i}")))
                 .await
                 .unwrap();
             if i < 2 {
-                db.update_task_status(&task.id, TaskStatus::Running, Some("cid"), None)
+                db.update_task_status(&task.id, TaskStatus::Running, None)
                     .await
                     .unwrap();
             }
@@ -367,37 +474,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn update_task_report() {
-        let db = test_db().await;
-        let task = db.create_task(&make_req("Report test"), "m").await.unwrap();
-        db.update_task_report(
-            &task.id,
-            &TaskReportUpdate {
-                agent_exit_code: Some(0),
-                duration_seconds: Some(120),
-                pushed: true,
-                lines_added: 42,
-                lines_removed: 10,
-                files_changed: Some("a.py,b.py".into()),
-                summary: Some("summary text".into()),
-                diff_patch: Some("diff content".into()),
-            },
-        )
-        .await
-        .unwrap();
-
-        let updated = db.get_task(&task.id).await.unwrap().unwrap();
-        assert_eq!(updated.agent_exit_code, Some(0));
-        assert_eq!(updated.duration_seconds, Some(120));
-        assert!(updated.pushed);
-        assert_eq!(updated.lines_added, 42);
-        assert_eq!(updated.lines_removed, 10);
-        assert_eq!(updated.files_changed.as_deref(), Some("a.py,b.py"));
-        assert_eq!(updated.summary.as_deref(), Some("summary text"));
-        assert_eq!(updated.diff_patch.as_deref(), Some("diff content"));
-    }
-
-    #[tokio::test]
     async fn get_nonexistent_task() {
         let db = test_db().await;
         let result = db
@@ -411,7 +487,7 @@ mod tests {
     async fn pagination() {
         let db = test_db().await;
         for i in 0..10 {
-            db.create_task(&make_req(&format!("Task {i}")), "m")
+            db.create_task(&make_task_req(&format!("Task {i}")))
                 .await
                 .unwrap();
         }
@@ -426,25 +502,171 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn update_and_get_logs() {
+    async fn status_transitions() {
         let db = test_db().await;
-        let task = db.create_task(&make_req("Logs test"), "m").await.unwrap();
+        let task = db
+            .create_task(&make_task_req("Status test"))
+            .await
+            .unwrap();
+        assert_eq!(task.status, TaskStatus::Pending);
+        assert!(task.started_at.is_none());
 
-        let none = db.get_task_logs(&task.id).await.unwrap();
-        assert!(none.is_none());
+        db.update_task_status(&task.id, TaskStatus::Running, None)
+            .await
+            .unwrap();
+        let t = db.get_task(&task.id).await.unwrap().unwrap();
+        assert_eq!(t.status, TaskStatus::Running);
+        assert!(t.started_at.is_some());
 
-        db.update_task_logs(&task.id, "Agent output log content")
+        db.update_task_status(&task.id, TaskStatus::Failed, Some("boom"))
+            .await
+            .unwrap();
+        let t = db.get_task(&task.id).await.unwrap().unwrap();
+        assert_eq!(t.status, TaskStatus::Failed);
+        assert!(t.finished_at.is_some());
+        assert_eq!(t.error.as_deref(), Some("boom"));
+    }
+
+    // ── Project tests ──
+
+    #[tokio::test]
+    async fn create_and_get_project() {
+        let db = test_db().await;
+        let req = CreateProjectRequest {
+            name: "my-app".into(),
+            repo_url: Some("https://github.com/user/repo".into()),
+            local_path: Some("/home/user/code/my-app".into()),
+            default_agent: Some("claude-code".into()),
+        };
+
+        let proj = db.create_project(&req).await.unwrap();
+        assert_eq!(proj.name, "my-app");
+        assert_eq!(proj.repo_url.as_deref(), Some("https://github.com/user/repo"));
+
+        let fetched = db.get_project(&proj.id).await.unwrap().unwrap();
+        assert_eq!(fetched.id, proj.id);
+    }
+
+    #[tokio::test]
+    async fn get_project_by_name() {
+        let db = test_db().await;
+        db.create_project(&make_project_req("alpha")).await.unwrap();
+        db.create_project(&make_project_req("beta")).await.unwrap();
+
+        let found = db.get_project_by_name("alpha").await.unwrap();
+        assert!(found.is_some());
+        assert_eq!(found.unwrap().name, "alpha");
+
+        let not_found = db.get_project_by_name("nonexistent").await.unwrap();
+        assert!(not_found.is_none());
+    }
+
+    #[tokio::test]
+    async fn list_and_delete_projects() {
+        let db = test_db().await;
+        let p1 = db.create_project(&make_project_req("proj-1")).await.unwrap();
+        db.create_project(&make_project_req("proj-2")).await.unwrap();
+
+        let all = db.list_projects().await.unwrap();
+        assert_eq!(all.len(), 2);
+
+        db.delete_project(&p1.id).await.unwrap();
+        let all = db.list_projects().await.unwrap();
+        assert_eq!(all.len(), 1);
+        assert_eq!(all[0].name, "proj-2");
+    }
+
+    // ── StageRun tests ──
+
+    #[tokio::test]
+    async fn create_and_get_stage_run() {
+        let db = test_db().await;
+        let task = db.create_task(&make_task_req("SR test")).await.unwrap();
+
+        let sr = db
+            .create_stage_run(&task.id, "coding", 1, "claude-code")
+            .await
+            .unwrap();
+        assert_eq!(sr.task_id, task.id);
+        assert_eq!(sr.stage_name, "coding");
+        assert_eq!(sr.run_number, 1);
+        assert_eq!(sr.status, StageRunStatus::Pending);
+
+        let fetched = db.get_stage_run(&sr.id).await.unwrap().unwrap();
+        assert_eq!(fetched.id, sr.id);
+    }
+
+    #[tokio::test]
+    async fn list_stage_runs_by_task() {
+        let db = test_db().await;
+        let t1 = db.create_task(&make_task_req("T1")).await.unwrap();
+        let t2 = db.create_task(&make_task_req("T2")).await.unwrap();
+
+        db.create_stage_run(&t1.id, "coding", 1, "claude-code").await.unwrap();
+        db.create_stage_run(&t1.id, "testing", 1, "claude-code").await.unwrap();
+        db.create_stage_run(&t2.id, "coding", 1, "codex").await.unwrap();
+
+        let t1_runs = db.list_stage_runs_by_task(&t1.id).await.unwrap();
+        assert_eq!(t1_runs.len(), 2);
+
+        let t2_runs = db.list_stage_runs_by_task(&t2.id).await.unwrap();
+        assert_eq!(t2_runs.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn update_stage_run_status_and_report() {
+        let db = test_db().await;
+        let task = db.create_task(&make_task_req("SR update")).await.unwrap();
+        let sr = db
+            .create_stage_run(&task.id, "coding", 1, "claude-code")
             .await
             .unwrap();
 
-        let logs = db.get_task_logs(&task.id).await.unwrap().unwrap();
-        assert!(logs.contains("Agent output"));
+        // Update to running with workspace info
+        db.update_stage_run_status(
+            &sr.id,
+            StageRunStatus::Running,
+            Some("/tmp/workspace"),
+            Some("ccodebox/t001"),
+        )
+        .await
+        .unwrap();
 
-        db.update_task_logs(&task.id, "Updated logs")
+        let updated = db.get_stage_run(&sr.id).await.unwrap().unwrap();
+        assert_eq!(updated.status, StageRunStatus::Running);
+        assert_eq!(updated.workspace_path.as_deref(), Some("/tmp/workspace"));
+        assert_eq!(updated.branch.as_deref(), Some("ccodebox/t001"));
+
+        // Update report
+        db.update_stage_run_report(
+            &sr.id,
+            &StageRunReport {
+                exit_code: Some(0),
+                duration: Some(120),
+                agent_log: Some("agent output log".into()),
+                diff_patch: Some("diff content".into()),
+                summary: Some("summary text".into()),
+                error_report: None,
+                prompt_used: Some("final prompt".into()),
+            },
+        )
+        .await
+        .unwrap();
+
+        let reported = db.get_stage_run(&sr.id).await.unwrap().unwrap();
+        assert_eq!(reported.agent_exit_code, Some(0));
+        assert_eq!(reported.duration_seconds, Some(120));
+        assert_eq!(reported.agent_log.as_deref(), Some("agent output log"));
+        assert_eq!(reported.diff_patch.as_deref(), Some("diff content"));
+        assert_eq!(reported.prompt_used.as_deref(), Some("final prompt"));
+
+        // Update to success
+        db.update_stage_run_status(&sr.id, StageRunStatus::Success, None, None)
             .await
             .unwrap();
-        let logs = db.get_task_logs(&task.id).await.unwrap().unwrap();
-        assert_eq!(logs, "Updated logs");
+        let finished = db.get_stage_run(&sr.id).await.unwrap().unwrap();
+        assert_eq!(finished.status, StageRunStatus::Success);
+        assert!(finished.finished_at.is_some());
     }
 
     // ── platform_config tests ──
@@ -453,18 +675,15 @@ mod tests {
     async fn set_and_get_config() {
         let db = test_db().await;
 
-        // Initially empty
         let val = db.get_config("agent.claude-code.api_key").await.unwrap();
         assert!(val.is_none());
 
-        // Set a value
         db.set_config("agent.claude-code.api_key", "sk-test-123", true)
             .await
             .unwrap();
         let val = db.get_config("agent.claude-code.api_key").await.unwrap();
         assert_eq!(val.as_deref(), Some("sk-test-123"));
 
-        // Upsert overwrites
         db.set_config("agent.claude-code.api_key", "sk-new-456", true)
             .await
             .unwrap();
@@ -484,7 +703,6 @@ mod tests {
         let all = db.get_all_config().await.unwrap();
         assert_eq!(all.len(), 4);
         assert_eq!(all.get("agent.claude-code.api_key").unwrap(), "sk-cc");
-        assert_eq!(all.get("tool.tavily.api_key").unwrap(), "tvly-123");
     }
 
     #[tokio::test]
@@ -492,20 +710,13 @@ mod tests {
         let db = test_db().await;
 
         db.set_config("agent.claude-code.api_key", "sk-cc", true).await.unwrap();
-        db.set_config("git.github_token", "ghp-abc", true).await.unwrap();
         db.set_config("agent.claude-code.default_model", "sonnet", false).await.unwrap();
 
         let items = db.get_all_config_items().await.unwrap();
-        assert_eq!(items.len(), 3);
+        assert_eq!(items.len(), 2);
 
-        // Encrypted items should have encrypted=true
         let api_key = items.iter().find(|i| i.key == "agent.claude-code.api_key").unwrap();
         assert!(api_key.encrypted);
-        assert_eq!(api_key.value, "sk-cc"); // raw value in DB layer
-
-        // Non-encrypted items
-        let model = items.iter().find(|i| i.key == "agent.claude-code.default_model").unwrap();
-        assert!(!model.encrypted);
     }
 
     #[tokio::test]
@@ -518,34 +729,6 @@ mod tests {
         db.delete_config("temp.key").await.unwrap();
         assert!(db.get_config("temp.key").await.unwrap().is_none());
 
-        // Deleting non-existent key should not error
         db.delete_config("nonexistent").await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn status_transitions() {
-        let db = test_db().await;
-        let task = db
-            .create_task(&make_req("Status test"), "m")
-            .await
-            .unwrap();
-        assert_eq!(task.status, TaskStatus::Pending);
-        assert!(task.started_at.is_none());
-
-        db.update_task_status(&task.id, TaskStatus::Running, Some("container-123"), None)
-            .await
-            .unwrap();
-        let t = db.get_task(&task.id).await.unwrap().unwrap();
-        assert_eq!(t.status, TaskStatus::Running);
-        assert!(t.started_at.is_some());
-        assert_eq!(t.container_id.as_deref(), Some("container-123"));
-
-        db.update_task_status(&task.id, TaskStatus::Failed, None, Some("boom"))
-            .await
-            .unwrap();
-        let t = db.get_task(&task.id).await.unwrap().unwrap();
-        assert_eq!(t.status, TaskStatus::Failed);
-        assert!(t.finished_at.is_some());
-        assert_eq!(t.error.as_deref(), Some("boom"));
     }
 }

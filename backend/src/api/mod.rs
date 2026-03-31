@@ -1,37 +1,40 @@
+pub mod projects;
 pub mod tasks;
 
 use std::sync::Arc;
 
-use axum::routing::{get, post, put};
+use axum::routing::{delete, get, post, put};
 use axum::Router;
 
-use crate::container::manager::ContainerRuntime;
 use crate::AppState;
 
-pub fn router<R: ContainerRuntime>(state: Arc<AppState<R>>) -> Router {
+pub fn router(state: Arc<AppState>) -> Router {
     Router::new()
-        .route("/api/tasks", post(tasks::create_task::<R>))
-        .route("/api/tasks", get(tasks::list_tasks::<R>))
-        .route("/api/tasks/{id}", get(tasks::get_task::<R>))
-        .route("/api/tasks/{id}/logs", get(tasks::get_task_logs::<R>))
-        .route("/api/tasks/{id}/cancel", post(tasks::cancel_task::<R>))
-        .route("/api/settings", get(tasks::get_settings::<R>))
-        .route("/api/settings", put(tasks::update_settings::<R>))
+        // Tasks
+        .route("/api/tasks", post(tasks::create_task))
+        .route("/api/tasks", get(tasks::list_tasks))
+        .route("/api/tasks/{id}", get(tasks::get_task))
+        .route("/api/tasks/{id}/stages", get(tasks::get_task_stages))
+        .route("/api/tasks/{id}/cancel", post(tasks::cancel_task))
+        // Run (single stage shortcut)
+        .route("/api/run", post(tasks::run_stage))
+        // Projects
+        .route("/api/projects", post(projects::create_project))
+        .route("/api/projects", get(projects::list_projects))
+        .route("/api/projects/{id}", get(projects::get_project))
+        .route("/api/projects/{id}", delete(projects::delete_project))
+        // Stage runs
+        .route("/api/stage-runs/{id}", get(tasks::get_stage_run))
+        // Settings
+        .route("/api/settings", get(tasks::get_settings))
+        .route("/api/settings", put(tasks::update_settings))
         .route(
             "/api/settings/test-agent",
-            post(tasks::test_agent::<R>),
+            post(tasks::test_agent),
         )
         .route(
             "/api/settings/test-tool",
-            post(tasks::test_tool::<R>),
-        )
-        .route(
-            "/api/settings/images",
-            get(tasks::get_image_status::<R>),
-        )
-        .route(
-            "/api/settings/images/build",
-            post(tasks::build_images::<R>),
+            post(tasks::test_tool),
         )
         .with_state(state)
         .fallback(crate::frontend::serve_frontend)
