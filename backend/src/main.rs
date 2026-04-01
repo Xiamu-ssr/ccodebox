@@ -93,7 +93,7 @@ Commands:
 
 async fn cmd_serve() -> Result<()> {
     let host = std::env::var("CCODEBOX_HOST").unwrap_or_else(|_| "0.0.0.0".into());
-    let port = std::env::var("CCODEBOX_PORT").unwrap_or_else(|_| "3000".into());
+    let port = std::env::var("CCODEBOX_PORT").unwrap_or_else(|_| "3456".into());
 
     let db = open_db().await?;
     let adapter_registry = AdapterRegistry::new();
