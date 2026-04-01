@@ -35,3 +35,4 @@ dist/
 # Logs & temp
 *.log
 *.png
+!assets/*.png
