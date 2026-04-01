@@ -1,17 +1,21 @@
 # Rust
-backend/target/
+target/
 
-# ts-rs intermediate output (merged into frontend/src/lib/types.generated.ts by gen_types.sh)
+# ts-rs intermediate output (copied to frontend by sync-types)
 backend/bindings/
 
 # SQLite database
 backend/data/
 
+# Runtime data
+~/.ccodebox/
+
 # Node.js / Next.js
-frontend/node_modules/
-frontend/.next/
-frontend/out/
-frontend/build/
+node_modules/
+.next/
+out/
+build/
+dist/
 
 # Environment variables
 .env
@@ -24,9 +28,10 @@ frontend/build/
 .vscode/
 .idea/
 .claude/
+
 # macOS
 .DS_Store
 
-# Logs
+# Logs & temp
 *.log
 *.png

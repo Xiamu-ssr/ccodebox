@@ -88,6 +88,7 @@ pub mod tests {
     pub struct MockAdapter {
         pub name: String,
         pub installed: bool,
+        pub should_succeed: bool,
     }
 
     impl MockAdapter {
@@ -95,7 +96,13 @@ pub mod tests {
             Self {
                 name: name.into(),
                 installed,
+                should_succeed: true,
             }
+        }
+
+        pub fn with_success(mut self, should_succeed: bool) -> Self {
+            self.should_succeed = should_succeed;
+            self
         }
     }
 
@@ -106,11 +113,16 @@ pub mod tests {
             let log_path = request.working_dir.join(".ccodebox-agent.log");
             tokio::fs::write(&log_path, "mock agent output").await?;
 
-            // 用 echo 作为假子进程
-            let child = tokio::process::Command::new("echo")
-                .arg("mock")
-                .stdout(std::process::Stdio::null())
-                .spawn()?;
+            // 成功用 true，失败用 false（exit code 1）
+            let child = if self.should_succeed {
+                tokio::process::Command::new("true")
+                    .stdout(std::process::Stdio::null())
+                    .spawn()?
+            } else {
+                tokio::process::Command::new("false")
+                    .stdout(std::process::Stdio::null())
+                    .spawn()?
+            };
 
             Ok(AgentHandle { child, log_path })
         }

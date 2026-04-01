@@ -12,7 +12,7 @@ use ts_rs::TS;
 )]
 #[ts(export)]
 #[sea_orm(rs_type = "String", db_type = "String(StringLen::N(20))")]
-#[serde(rename_all = "snake_case")]
+#[serde(rename_all = "kebab-case")]
 pub enum AgentType {
     #[sea_orm(string_value = "claude-code")]
     ClaudeCode,
@@ -82,6 +82,8 @@ pub enum StageRunStatus {
     Success,
     #[sea_orm(string_value = "failed")]
     Failed,
+    #[sea_orm(string_value = "cancelled")]
+    Cancelled,
 }
 
 impl StageRunStatus {
@@ -91,6 +93,8 @@ impl StageRunStatus {
             (Self::Pending, Self::Running)
                 | (Self::Running, Self::Success)
                 | (Self::Running, Self::Failed)
+                | (Self::Running, Self::Cancelled)
+                | (Self::Pending, Self::Cancelled)
         )
     }
 }
@@ -172,7 +176,10 @@ pub struct StageRun {
     pub status: StageRunStatus,
     pub workspace_path: Option<String>,
     pub branch: Option<String>,
+    pub agent_pid: Option<i32>,
     pub agent_exit_code: Option<i32>,
+    pub prompt_used: Option<String>,
+    pub agent_log: Option<String>,
     pub diff_patch: Option<String>,
     pub summary: Option<String>,
     pub error_report: Option<String>,
@@ -192,7 +199,10 @@ impl From<crate::entity::stage_run::Model> for StageRun {
             status: m.status,
             workspace_path: m.workspace_path,
             branch: m.branch,
+            agent_pid: m.agent_pid,
             agent_exit_code: m.agent_exit_code,
+            prompt_used: m.prompt_used,
+            agent_log: m.agent_log,
             diff_patch: m.diff_patch,
             summary: m.summary,
             error_report: m.error_report,
@@ -233,6 +243,7 @@ pub struct TaskListResponse {
 #[derive(Debug, Deserialize)]
 pub struct TaskListQuery {
     pub status: Option<String>,
+    pub project_id: Option<String>,
     pub limit: Option<u64>,
     pub offset: Option<u64>,
 }
@@ -293,11 +304,85 @@ pub struct UpdateSettingsRequest {
     pub config: Vec<ConfigItem>,
 }
 
+// ── Task Type definitions (for /api/task-types) ──
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct TaskTypeInfo {
+    pub name: String,
+    pub description: String,
+    pub inputs: Vec<TaskTypeInput>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct TaskTypeInput {
+    pub name: String,
+    pub description: String,
+    pub required: bool,
+    pub default: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct TaskTypeListResponse {
+    pub task_types: Vec<TaskTypeInfo>,
+}
+
 #[derive(Debug, Serialize, Deserialize, TS)]
 #[ts(export)]
 pub struct TestResult {
     pub success: bool,
     pub message: String,
+}
+
+// ── Template (API response) ──
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct Template {
+    pub id: String,
+    pub name: String,
+    pub description: String,
+    pub definition: String,
+    pub builtin: bool,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+impl From<crate::entity::template::Model> for Template {
+    fn from(m: crate::entity::template::Model) -> Self {
+        Self {
+            id: m.id,
+            name: m.name,
+            description: m.description,
+            definition: m.definition,
+            builtin: m.builtin,
+            created_at: m.created_at,
+            updated_at: m.updated_at,
+        }
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct TemplateListResponse {
+    pub templates: Vec<Template>,
+}
+
+#[derive(Debug, Deserialize, TS)]
+#[ts(export)]
+pub struct CreateTemplateRequest {
+    pub name: String,
+    pub description: String,
+    pub definition: String,
+}
+
+#[derive(Debug, Deserialize, TS)]
+#[ts(export)]
+pub struct UpdateTemplateRequest {
+    pub description: Option<String>,
+    pub definition: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]

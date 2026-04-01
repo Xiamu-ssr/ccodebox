@@ -1,6 +1,10 @@
 import type { Metadata } from "next";
 import Link from "next/link";
 import "./globals.css";
+import { Geist } from "next/font/google";
+import { cn } from "@/lib/utils";
+
+const geist = Geist({subsets:['latin'],variable:'--font-sans'});
 
 export const metadata: Metadata = {
   title: "CCodeBoX",
@@ -13,35 +17,41 @@ export default function RootLayout({
   children: React.ReactNode;
 }) {
   return (
-    <html lang="en" className="dark">
-      <body className="min-h-screen">
-        <header className="border-b border-border sticky top-0 z-50 bg-bg-surface/80 backdrop-blur-sm">
+    <html lang="en" className={cn("dark", "font-sans", geist.variable)}>
+      <body className="min-h-screen bg-background text-foreground dark">
+        <header className="border-b sticky top-0 z-50 bg-background/80 backdrop-blur-sm">
           <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
             <div className="flex items-center justify-between h-14">
               <Link
-                href="/"
-                className="text-lg font-bold tracking-tight text-text-primary hover:text-primary transition-colors"
+                href="/projects"
+                className="text-lg font-bold tracking-tight hover:text-primary transition-colors"
               >
                 CCodeBoX
               </Link>
-              <nav className="flex items-center gap-4">
+              <nav className="flex items-center gap-6">
                 <Link
-                  href="/"
-                  className="text-sm text-text-secondary hover:text-text-primary transition-colors"
+                  href="/projects"
+                  className="text-sm text-muted-foreground hover:text-foreground transition-colors"
                 >
-                  Tasks
+                  Projects
+                </Link>
+                <Link
+                  href="/templates"
+                  className="text-sm text-muted-foreground hover:text-foreground transition-colors"
+                >
+                  Templates
+                </Link>
+                <Link
+                  href="/playground"
+                  className="text-sm text-muted-foreground hover:text-foreground transition-colors"
+                >
+                  Playground
                 </Link>
                 <Link
                   href="/settings"
-                  className="text-sm text-text-secondary hover:text-text-primary transition-colors"
+                  className="text-sm text-muted-foreground hover:text-foreground transition-colors"
                 >
                   Settings
-                </Link>
-                <Link
-                  href="/tasks/new"
-                  className="text-sm bg-primary hover:bg-primary-hover text-white px-3 py-1.5 rounded-md transition-colors"
-                >
-                  New Task
                 </Link>
               </nav>
             </div>

@@ -17,9 +17,3 @@
 2. 不加多余抽象——先跑通再优化，不提前写 trait/interface
 3. 删掉不用的代码——不留死代码
 4. 一次只做一件事——按 Exec Plan 步骤顺序执行
-
-## 设计文档
-
-任务执行前先读相关设计文档：
-- `docs/phase1-exec-plan.md` — Phase 1 原始设计
-- `docs/phase1-supplement.md` — Phase 1 修正（**冲突时以此为准**）

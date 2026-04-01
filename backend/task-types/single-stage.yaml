@@ -1,0 +1,19 @@
+name: single-stage
+description: "Single agent execution"
+inputs:
+  - name: prompt
+    description: "Task description"
+    required: true
+  - name: agent_type
+    description: "Agent type"
+    required: true
+    default: "claude-code"
+  - name: model
+    description: "Model override"
+    required: false
+
+stages:
+  - name: coding
+    agent: "${agent_type}"
+    needs_branch: true
+    prompt: "${prompt}"

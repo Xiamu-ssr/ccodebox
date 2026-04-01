@@ -9,11 +9,12 @@ use uuid::Uuid;
 use crate::adapter::AdapterRegistry;
 use crate::consts;
 use crate::contracts::{
-    AgentType, ConfigItem, CreateTaskRequest, CreateTaskResponse, RunStageRequest, StageRun, Task,
-    TaskListQuery, TaskListResponse, TaskStatus, TestAgentRequest, TestResult, TestToolRequest,
-    UpdateSettingsRequest,
+    AgentInfo, ConfigItem, CreateTaskRequest, CreateTaskResponse, RunStageRequest, StageRun,
+    StageRunStatus, Task, TaskListQuery, TaskListResponse, TaskStatus, TaskTypeListResponse,
+    TestAgentRequest, TestResult, TestToolRequest, UpdateSettingsRequest,
 };
 use crate::engine::stage::{StageExecParams, StageExecutor};
+use crate::engine::task::TaskOrchestrator;
 use crate::workspace::WorkspaceManager;
 use crate::AppState;
 
@@ -49,84 +50,17 @@ pub async fn create_task(
     Ok((StatusCode::CREATED, Json(response)))
 }
 
-/// 后台执行 task 的 stages
+/// 后台执行 task — 委托给 TaskOrchestrator
 async fn execute_task_stages(task_id: String, state: Arc<AppState>) -> anyhow::Result<()> {
-    // 更新 task 为 Running
-    state
-        .db
-        .update_task_status(&task_id, TaskStatus::Running, None)
-        .await?;
-
-    let task = state
-        .db
-        .get_task(&task_id)
-        .await?
-        .ok_or_else(|| anyhow::anyhow!("Task not found: {task_id}"))?;
-
-    let project_id = task
-        .project_id
-        .as_ref()
-        .ok_or_else(|| anyhow::anyhow!("Task has no project_id"))?;
-
-    let project = state
-        .db
-        .get_project(project_id)
-        .await?
-        .ok_or_else(|| anyhow::anyhow!("Project not found: {project_id}"))?;
-
-    let repo_path = project
-        .local_path
-        .as_ref()
-        .ok_or_else(|| anyhow::anyhow!("Project has no local_path"))?;
-
-    let env_config = state.db.get_all_config().await.unwrap_or_default();
-
-    let executor = StageExecutor {
+    let orchestrator = TaskOrchestrator {
         db: state.db.clone(),
-        adapter_registry: AdapterRegistry::new(),
-        workspace_manager: WorkspaceManager::new(WorkspaceManager::default_base_dir()),
+        stage_executor: StageExecutor {
+            db: state.db.clone(),
+            adapter_registry: AdapterRegistry::new(),
+            workspace_manager: WorkspaceManager::new(WorkspaceManager::default_base_dir()),
+        },
     };
-
-    let agent_type = project
-        .default_agent
-        .as_deref()
-        .and_then(|s| serde_json::from_value::<AgentType>(serde_json::Value::String(s.into())).ok())
-        .unwrap_or(AgentType::ClaudeCode);
-
-    let result = executor
-        .execute(StageExecParams {
-            task_id: task_id.clone(),
-            project_name: project.name.clone(),
-            repo_path: repo_path.clone(),
-            stage_name: "coding".into(),
-            agent_type,
-            prompt: task.prompt.clone(),
-            model: None,
-            env_config,
-            needs_branch: true,
-        })
-        .await;
-
-    match result {
-        Ok(_) => {
-            state
-                .db
-                .update_task_status(&task_id, TaskStatus::Success, None)
-                .await?;
-        }
-        Err(e) => {
-            state
-                .db
-                .update_task_status(
-                    &task_id,
-                    TaskStatus::Failed,
-                    Some(&format!("{e}")),
-                )
-                .await?;
-        }
-    }
-
-    Ok(())
+    orchestrator.execute(&task_id).await
 }
 
 /// POST /api/run — 单 stage 直接运行（最简模式）
@@ -183,6 +117,12 @@ pub async fn run_stage(
 
         let env_config = state.db.get_all_config().await.unwrap_or_default();
 
+        // Default model fallback: if not specified, use per-agent default from settings
+        let model = model.or_else(|| {
+            let key = format!("agent.{}.default_model", agent_type.as_str());
+            env_config.get(&key).cloned().filter(|v| !v.is_empty())
+        });
+
         let executor = StageExecutor {
             db: state.db.clone(),
             adapter_registry: AdapterRegistry::new(),
@@ -225,6 +165,16 @@ fn truncate(s: &str, max: usize) -> &str {
     }
 }
 
+/// GET /api/task-types — 返回可用的任务类型列表（从 DB 读取）
+pub async fn list_task_types(
+    State(state): State<Arc<AppState>>,
+) -> AppResult<Json<TaskTypeListResponse>> {
+    let infos = crate::engine::task_type::list_task_types_from_db(&state.db)
+        .await
+        .map_err(AppError::Internal)?;
+    Ok(Json(TaskTypeListResponse { task_types: infos }))
+}
+
 pub async fn list_tasks(
     State(state): State<Arc<AppState>>,
     Query(query): Query<TaskListQuery>,
@@ -246,7 +196,7 @@ pub async fn list_tasks(
 
     let (models, total) = state
         .db
-        .list_tasks(status, limit, offset)
+        .list_tasks(status, query.project_id.as_deref(), limit, offset)
         .await
         .map_err(AppError::Internal)?;
 
@@ -312,26 +262,116 @@ pub async fn cancel_task(
     State(state): State<Arc<AppState>>,
     Path(id): Path<Uuid>,
 ) -> AppResult<StatusCode> {
+    let task_id = id.to_string();
     let model = state
         .db
-        .get_task(&id.to_string())
+        .get_task(&task_id)
         .await
         .map_err(AppError::Internal)?
         .ok_or(AppError::NotFound)?;
 
-    if model.status != TaskStatus::Running {
-        return Err(AppError::BadRequest("Task is not running".into()));
+    if model.status != TaskStatus::Running && model.status != TaskStatus::Pending {
+        return Err(AppError::BadRequest("Task is not running or pending".into()));
     }
 
-    // TODO: Phase C — kill running agent process
+    // 1. 查找所有 active stage runs → kill agent 进程
+    let active_runs = state
+        .db
+        .get_active_stage_runs(&task_id)
+        .await
+        .map_err(AppError::Internal)?;
 
+    for run in &active_runs {
+        // Kill agent process by PID
+        if let Some(pid) = run.agent_pid {
+            kill_process_tree(pid);
+        }
+        // Update stage run status to Cancelled
+        let _ = state
+            .db
+            .update_stage_run_status(
+                &run.id,
+                StageRunStatus::Cancelled,
+                None,
+                None,
+            )
+            .await;
+    }
+
+    // 2. Update task status
     state
         .db
-        .update_task_status(&id.to_string(), TaskStatus::Cancelled, None)
+        .update_task_status(&task_id, TaskStatus::Cancelled, None)
         .await
         .map_err(AppError::Internal)?;
 
     Ok(StatusCode::OK)
+}
+
+/// Kill a process and its children. Sends SIGTERM first, then SIGKILL after 2s.
+fn kill_process_tree(pid: i32) {
+    use std::process::Command;
+
+    // First try to kill the process group (negative PID)
+    let _ = Command::new("kill").args(["-TERM", &format!("-{pid}")]).output();
+
+    // Also kill the specific PID
+    let _ = Command::new("kill").args(["-TERM", &pid.to_string()]).output();
+
+    // Schedule a SIGKILL after 2 seconds in case SIGTERM doesn't work
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_secs(2));
+        let _ = Command::new("kill").args(["-9", &format!("-{pid}")]).output();
+        let _ = Command::new("kill").args(["-9", &pid.to_string()]).output();
+    });
+}
+
+/// POST /api/stage-runs/{id}/stop — stop a single running stage run
+pub async fn stop_stage_run(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<Uuid>,
+) -> AppResult<StatusCode> {
+    let run_id = id.to_string();
+    let run = state
+        .db
+        .get_stage_run(&run_id)
+        .await
+        .map_err(AppError::Internal)?
+        .ok_or(AppError::NotFound)?;
+
+    if run.status != StageRunStatus::Running {
+        return Err(AppError::BadRequest("Stage run is not running".into()));
+    }
+
+    // Kill agent process
+    if let Some(pid) = run.agent_pid {
+        kill_process_tree(pid);
+    }
+
+    // Update stage run status to Cancelled
+    state
+        .db
+        .update_stage_run_status(&run_id, StageRunStatus::Cancelled, None, None)
+        .await
+        .map_err(AppError::Internal)?;
+
+    Ok(StatusCode::OK)
+}
+
+/// GET /api/agents — returns available agent types + installation status
+pub async fn list_agents(
+    State(state): State<Arc<AppState>>,
+) -> AppResult<Json<Vec<AgentInfo>>> {
+    let mut agents = Vec::new();
+    for (agent_type, adapter) in state.adapter_registry.all() {
+        let installed = adapter.check_installed().await.unwrap_or(false);
+        agents.push(AgentInfo {
+            agent_type: *agent_type,
+            name: agent_type.as_str().to_string(),
+            installed,
+        });
+    }
+    Ok(Json(agents))
 }
 
 /// GET /api/settings — returns agent info + masked config from DB

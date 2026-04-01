@@ -4,7 +4,6 @@ use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::Json;
-use uuid::Uuid;
 
 use crate::contracts::{CreateProjectRequest, Project, ProjectListResponse};
 use crate::AppState;
@@ -13,14 +12,64 @@ use super::tasks::AppError;
 
 type AppResult<T> = Result<T, AppError>;
 
+/// POST /api/projects
+/// 如果只有 repo_url 没有 local_path，自动 clone 到 ~/.ccodebox/repos/{name}
 pub async fn create_project(
     State(state): State<Arc<AppState>>,
-    Json(req): Json<CreateProjectRequest>,
+    Json(mut req): Json<CreateProjectRequest>,
 ) -> AppResult<impl IntoResponse> {
-    if req.repo_url.is_none() && req.local_path.is_none() {
-        return Err(AppError::BadRequest(
-            "repo_url or local_path must be provided".into(),
-        ));
+    if req.name.trim().is_empty() {
+        return Err(AppError::BadRequest("name is required".into()));
+    }
+
+    // 如果有 repo_url 但没有 local_path → 自动 clone
+    if req.local_path.is_none() {
+        if let Some(repo_url) = &req.repo_url {
+            let repos_dir = dirs::home_dir()
+                .unwrap_or_else(|| std::path::PathBuf::from("."))
+                .join(".ccodebox")
+                .join("repos")
+                .join(&req.name);
+
+            let repos_dir_str = repos_dir.to_str().unwrap_or("").to_string();
+
+            // 如果目录已存在且是 git repo，跳过 clone
+            if !repos_dir.join(".git").exists() {
+                tokio::fs::create_dir_all(&repos_dir)
+                    .await
+                    .map_err(|e| AppError::Internal(e.into()))?;
+
+                let output = tokio::process::Command::new("git")
+                    .args(["clone", repo_url, &repos_dir_str])
+                    .output()
+                    .await
+                    .map_err(|e| AppError::Internal(e.into()))?;
+
+                if !output.status.success() {
+                    let stderr = String::from_utf8_lossy(&output.stderr);
+                    // clone 失败，清理目录
+                    tokio::fs::remove_dir_all(&repos_dir).await.ok();
+                    return Err(AppError::BadRequest(format!(
+                        "git clone failed: {stderr}"
+                    )));
+                }
+            }
+
+            req.local_path = Some(repos_dir_str);
+        } else {
+            return Err(AppError::BadRequest(
+                "repo_url is required (or use CLI with --from for local repos)".into(),
+            ));
+        }
+    } else {
+        // 有 local_path，验证是 git repo
+        let path = req.local_path.as_ref().unwrap();
+        let git_dir = std::path::Path::new(path).join(".git");
+        if !git_dir.exists() {
+            return Err(AppError::BadRequest(format!(
+                "local_path is not a git repo: {path}"
+            )));
+        }
     }
 
     let model = state
@@ -47,11 +96,11 @@ pub async fn list_projects(
 
 pub async fn get_project(
     State(state): State<Arc<AppState>>,
-    Path(id): Path<Uuid>,
+    Path(id): Path<String>,
 ) -> AppResult<Json<Project>> {
     let model = state
         .db
-        .get_project(&id.to_string())
+        .get_project(&id)
         .await
         .map_err(AppError::Internal)?
         .ok_or(AppError::NotFound)?;
@@ -61,18 +110,18 @@ pub async fn get_project(
 
 pub async fn delete_project(
     State(state): State<Arc<AppState>>,
-    Path(id): Path<Uuid>,
+    Path(id): Path<String>,
 ) -> AppResult<StatusCode> {
     state
         .db
-        .get_project(&id.to_string())
+        .get_project(&id)
         .await
         .map_err(AppError::Internal)?
         .ok_or(AppError::NotFound)?;
 
     state
         .db
-        .delete_project(&id.to_string())
+        .delete_project(&id)
         .await
         .map_err(AppError::Internal)?;
 

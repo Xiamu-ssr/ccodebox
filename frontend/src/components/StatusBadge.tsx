@@ -1,9 +1,7 @@
 "use client";
 
-import type { TaskStatus } from "@/lib/types.generated";
-
 const STATUS_STYLES: Record<
-  TaskStatus,
+  string,
   { bg: string; text: string; dot: string; animate?: boolean }
 > = {
   pending: {
@@ -34,8 +32,14 @@ const STATUS_STYLES: Record<
   },
 };
 
-export default function StatusBadge({ status }: { status: TaskStatus }) {
-  const style = STATUS_STYLES[status];
+const DEFAULT_STYLE = {
+  bg: "bg-gray-500/10",
+  text: "text-gray-400",
+  dot: "bg-gray-400",
+};
+
+export default function StatusBadge({ status }: { status: string }) {
+  const style = STATUS_STYLES[status] ?? DEFAULT_STYLE;
 
   return (
     <span

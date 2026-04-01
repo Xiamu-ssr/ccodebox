@@ -1,0 +1,33 @@
+name: feature-dev
+description: "Feature development: code -> test -> done"
+inputs:
+  - name: requirement
+    description: "Feature requirement"
+    required: true
+  - name: agent_type
+    description: "Agent type"
+    default: "claude-code"
+  - name: model
+    description: "Model override"
+    required: false
+
+stages:
+  - name: coding
+    agent: "${agent_type}"
+    needs_branch: true
+    prompt: |
+      Develop the following feature:
+      ${requirement}
+
+  - name: testing
+    agent: "${agent_type}"
+    needs_branch: false
+    context_from: coding
+    prompt: |
+      Run comprehensive tests on the current code changes.
+      If issues found, output a detailed error report.
+      If all tests pass, output "ALL TESTS PASSED".
+    on_fail:
+      goto: coding
+      carry: error_report
+      max_retries: 3

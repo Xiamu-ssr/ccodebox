@@ -7,8 +7,9 @@ use sea_orm::{
 };
 use sea_orm::sea_query::OnConflict;
 
-use crate::contracts::{ConfigItem, CreateProjectRequest, CreateTaskRequest, StageRunStatus, TaskStatus};
-use crate::entity::{platform_config, project, stage_run, task};
+use crate::consts;
+use crate::contracts::{ConfigItem, CreateProjectRequest, CreateTaskRequest, CreateTemplateRequest, UpdateTemplateRequest, StageRunStatus, TaskStatus};
+use crate::entity::{platform_config, project, stage_run, task, template};
 
 /// Stage 执行报告，批量更新 stage_run 记录
 pub struct StageRunReport {
@@ -92,7 +93,25 @@ impl Database {
         );
         self.conn.execute(stmt).await?;
 
+        let stmt = builder.build(
+            &schema
+                .create_table_from_entity(template::Entity)
+                .if_not_exists()
+                .to_owned(),
+        );
+        self.conn.execute(stmt).await?;
+
+        // Incremental migrations for existing DBs
+        self.migrate_add_column("stage_runs", "agent_pid", "INTEGER").await;
+
         Ok(())
+    }
+
+    /// Best-effort ALTER TABLE ADD COLUMN (ignores "duplicate column" errors)
+    async fn migrate_add_column(&self, table: &str, column: &str, col_type: &str) {
+        let sql = format!("ALTER TABLE {table} ADD COLUMN {column} {col_type}");
+        // Ignore error — column may already exist
+        let _ = self.conn.execute_unprepared(&sql).await;
     }
 
     // ── Task CRUD ──
@@ -106,7 +125,7 @@ impl Database {
             title: Set(req.title.clone()),
             prompt: Set(req.prompt.clone()),
             project_id: Set(req.project_id.clone()),
-            task_type: Set(req.task_type.clone().unwrap_or_else(|| "single-stage".into())),
+            task_type: Set(req.task_type.clone().unwrap_or_else(|| consts::DEFAULT_TASK_TYPE.into())),
             inputs: Set(req.inputs.clone()),
             status: Set(TaskStatus::Pending),
             created_at: Set(now),
@@ -125,6 +144,7 @@ impl Database {
     pub async fn list_tasks(
         &self,
         status: Option<TaskStatus>,
+        project_id: Option<&str>,
         limit: u64,
         offset: u64,
     ) -> Result<(Vec<task::Model>, u64)> {
@@ -132,6 +152,9 @@ impl Database {
 
         if let Some(s) = status {
             query = query.filter(task::Column::Status.eq(s));
+        }
+        if let Some(pid) = project_id {
+            query = query.filter(task::Column::ProjectId.eq(pid));
         }
 
         let total = query.clone().count(&self.conn).await?;
@@ -326,6 +349,41 @@ impl Database {
         Ok(())
     }
 
+    /// 保存 agent 子进程 PID
+    pub async fn update_stage_run_pid(&self, id: &str, pid: i32) -> Result<()> {
+        let model = stage_run::ActiveModel {
+            id: Set(id.to_string()),
+            agent_pid: Set(Some(pid)),
+            ..Default::default()
+        };
+        model.update(&self.conn).await?;
+        Ok(())
+    }
+
+    /// 查找某个 task 下所有 running/pending 的 stage runs（用于取消）
+    pub async fn get_active_stage_runs(&self, task_id: &str) -> Result<Vec<stage_run::Model>> {
+        let result = stage_run::Entity::find()
+            .filter(stage_run::Column::TaskId.eq(task_id))
+            .filter(
+                stage_run::Column::Status.is_in([
+                    StageRunStatus::Running,
+                    StageRunStatus::Pending,
+                ]),
+            )
+            .all(&self.conn)
+            .await?;
+        Ok(result)
+    }
+
+    /// 查找所有 running 状态的 stage runs（用于启动恢复）
+    pub async fn get_all_running_stage_runs(&self) -> Result<Vec<stage_run::Model>> {
+        let result = stage_run::Entity::find()
+            .filter(stage_run::Column::Status.eq(StageRunStatus::Running))
+            .all(&self.conn)
+            .await?;
+        Ok(result)
+    }
+
     // ── platform_config CRUD ──
 
     pub async fn set_config(&self, key: &str, value: &str, encrypted: bool) -> Result<()> {
@@ -381,6 +439,111 @@ impl Database {
         platform_config::Entity::delete_by_id(key)
             .exec(&self.conn)
             .await?;
+        Ok(())
+    }
+
+    // ── Template CRUD ──
+
+    pub async fn create_template(
+        &self,
+        req: &CreateTemplateRequest,
+        builtin: bool,
+    ) -> Result<template::Model> {
+        let id = uuid::Uuid::new_v4().to_string();
+        let now = Utc::now();
+
+        let model = template::ActiveModel {
+            id: Set(id),
+            name: Set(req.name.clone()),
+            description: Set(req.description.clone()),
+            definition: Set(req.definition.clone()),
+            builtin: Set(builtin),
+            created_at: Set(now),
+            updated_at: Set(now),
+        };
+
+        let result = model.insert(&self.conn).await?;
+        Ok(result)
+    }
+
+    pub async fn get_template_by_name(&self, name: &str) -> Result<Option<template::Model>> {
+        let result = template::Entity::find()
+            .filter(template::Column::Name.eq(name))
+            .one(&self.conn)
+            .await?;
+        Ok(result)
+    }
+
+    pub async fn list_templates(&self) -> Result<Vec<template::Model>> {
+        let result = template::Entity::find()
+            .order_by_asc(template::Column::Name)
+            .all(&self.conn)
+            .await?;
+        Ok(result)
+    }
+
+    pub async fn update_template(
+        &self,
+        name: &str,
+        req: &UpdateTemplateRequest,
+    ) -> Result<Option<template::Model>> {
+        let existing = self.get_template_by_name(name).await?;
+        let Some(existing) = existing else {
+            return Ok(None);
+        };
+
+        let mut model = template::ActiveModel {
+            id: Set(existing.id),
+            updated_at: Set(Utc::now()),
+            ..Default::default()
+        };
+
+        if let Some(desc) = &req.description {
+            model.description = Set(desc.clone());
+        }
+        if let Some(def) = &req.definition {
+            model.definition = Set(def.clone());
+        }
+
+        let result = model.update(&self.conn).await?;
+        Ok(Some(result))
+    }
+
+    pub async fn delete_template(&self, name: &str) -> Result<bool> {
+        let existing = self.get_template_by_name(name).await?;
+        let Some(existing) = existing else {
+            return Ok(false);
+        };
+        if existing.builtin {
+            anyhow::bail!("Cannot delete builtin template: {name}");
+        }
+        template::Entity::delete_by_id(existing.id)
+            .exec(&self.conn)
+            .await?;
+        Ok(true)
+    }
+
+    /// Seed 内置模板（仅在不存在时插入）
+    pub async fn seed_builtin_templates(&self) -> Result<()> {
+        let single_stage_yaml = include_str!("../../task-types/single-stage.yaml");
+        let feature_dev_yaml = include_str!("../../task-types/feature-dev.yaml");
+
+        for (name, desc, yaml) in [
+            ("single-stage", "Single agent execution", single_stage_yaml),
+            ("feature-dev", "Feature development: code → test → done", feature_dev_yaml),
+        ] {
+            if self.get_template_by_name(name).await?.is_none() {
+                self.create_template(
+                    &CreateTemplateRequest {
+                        name: name.into(),
+                        description: desc.into(),
+                        definition: yaml.into(),
+                    },
+                    true,
+                )
+                .await?;
+            }
+        }
         Ok(())
     }
 }
@@ -460,12 +623,12 @@ mod tests {
             }
         }
 
-        let (all, total) = db.list_tasks(None, 20, 0).await.unwrap();
+        let (all, total) = db.list_tasks(None, None, 20, 0).await.unwrap();
         assert_eq!(total, 5);
         assert_eq!(all.len(), 5);
 
         let (running, running_total) = db
-            .list_tasks(Some(TaskStatus::Running), 20, 0)
+            .list_tasks(Some(TaskStatus::Running), None, 20, 0)
             .await
             .unwrap();
         assert_eq!(running_total, 2);
@@ -492,11 +655,11 @@ mod tests {
                 .unwrap();
         }
 
-        let (page1, total) = db.list_tasks(None, 3, 0).await.unwrap();
+        let (page1, total) = db.list_tasks(None, None, 3, 0).await.unwrap();
         assert_eq!(total, 10);
         assert_eq!(page1.len(), 3);
 
-        let (page2, _) = db.list_tasks(None, 3, 3).await.unwrap();
+        let (page2, _) = db.list_tasks(None, None, 3, 3).await.unwrap();
         assert_eq!(page2.len(), 3);
         assert_ne!(page1[0].id, page2[0].id);
     }

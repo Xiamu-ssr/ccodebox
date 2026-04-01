@@ -99,6 +99,9 @@ async fn cmd_serve() -> Result<()> {
     let adapter_registry = AdapterRegistry::new();
     let config = PlatformConfig::from_env();
 
+    // Startup recovery: mark orphaned running stage runs as failed
+    recover_orphaned_runs(&db).await;
+
     let state = Arc::new(AppState {
         db,
         adapter_registry,
@@ -118,6 +121,69 @@ async fn cmd_serve() -> Result<()> {
     axum::serve(listener, app).await?;
 
     Ok(())
+}
+
+/// 启动恢复：把所有 running 状态的 stage runs 标记为 failed
+/// 如果 PID 存在且进程还活着，先 kill 掉
+async fn recover_orphaned_runs(db: &db::Database) {
+    let runs = match db.get_all_running_stage_runs().await {
+        Ok(r) => r,
+        Err(_) => return,
+    };
+
+    if runs.is_empty() {
+        return;
+    }
+
+    tracing::info!("Recovering {} orphaned running stage runs", runs.len());
+
+    for run in &runs {
+        // Kill any still-alive agent process
+        if let Some(pid) = run.agent_pid {
+            if is_process_alive(pid) {
+                tracing::warn!("Killing orphaned agent process PID={pid} for stage_run={}", run.id);
+                let _ = std::process::Command::new("kill").args(["-9", &pid.to_string()]).output();
+            }
+        }
+
+        // Mark as failed
+        let _ = db
+            .update_stage_run_status(
+                &run.id,
+                contracts::StageRunStatus::Failed,
+                None,
+                None,
+            )
+            .await;
+        let _ = db
+            .update_stage_run_report(
+                &run.id,
+                &db::StageRunReport {
+                    exit_code: None,
+                    duration: None,
+                    agent_log: None,
+                    diff_patch: None,
+                    summary: None,
+                    error_report: Some("Server restarted while stage was running".to_string()),
+                    prompt_used: None,
+                },
+            )
+            .await;
+
+        // Also mark the parent task as failed if it's still running
+        let _ = db
+            .update_task_status(&run.task_id, contracts::TaskStatus::Failed, Some("Server restarted while task was running"))
+            .await;
+    }
+}
+
+fn is_process_alive(pid: i32) -> bool {
+    // kill -0 checks if process exists without actually sending a signal
+    std::process::Command::new("kill")
+        .args(["-0", &pid.to_string()])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
 }
 
 // ── project ──
@@ -312,6 +378,7 @@ async fn open_db() -> Result<Database> {
     });
     let db = Database::new(&database_url).await?;
     db.migrate().await?;
+    db.seed_builtin_templates().await?;
     Ok(db)
 }
 

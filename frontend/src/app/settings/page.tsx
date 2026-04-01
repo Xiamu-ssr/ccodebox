@@ -1,33 +1,21 @@
 "use client";
 
 import { useEffect, useState, useCallback } from "react";
-import type {
-  AgentInfo,
-  AgentType,
-  ConfigItem,
-} from "@/lib/types.generated";
-import {
-  getSettings,
-  updateSettings,
-  testAgent,
-  testTool,
-  getImageStatus,
-  buildImages,
-} from "@/lib/api";
+import type { AgentInfo, AgentType, ConfigItem } from "@/lib/types.generated";
+import { getSettings, updateSettings, testAgent, testTool } from "@/lib/api";
+import { Card, CardHeader, CardTitle, CardDescription, CardContent } from "@/components/ui/card";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { Skeleton } from "@/components/ui/skeleton";
+import { Badge } from "@/components/ui/badge";
+import { IconRobot, IconSettings, IconGitBranch, IconSearch, IconEye, IconEyeOff, IconCheck, IconX, IconLoader2 } from "@tabler/icons-react";
 
 // Config keys per agent type
-const AGENT_CONFIG: Record<
-  string,
-  { keyPrefix: string; hasBaseUrl: boolean }
-> = {
-  claude_code: { keyPrefix: "agent.claude-code", hasBaseUrl: true },
-  codex: { keyPrefix: "agent.codex", hasBaseUrl: true },
+const AGENT_CONFIG: Record<string, { keyPrefix: string }> = {
+  "claude-code": { keyPrefix: "agent.claude-code" },
+  codex: { keyPrefix: "agent.codex" },
 };
-
-interface ImageStatus {
-  name: string;
-  ready: boolean;
-}
 
 export default function SettingsPage() {
   const [agents, setAgents] = useState<AgentInfo[]>([]);
@@ -35,12 +23,6 @@ export default function SettingsPage() {
   const [savedConfig, setSavedConfig] = useState<Record<string, string>>({});
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
-  const [testResults, setTestResults] = useState<
-    Record<string, { success: boolean; message: string } | null>
-  >({});
-  const [testing, setTesting] = useState<Record<string, boolean>>({});
-  const [images, setImages] = useState<ImageStatus[]>([]);
-  const [building, setBuilding] = useState(false);
 
   const fetchSettings = useCallback(async () => {
     try {
@@ -59,19 +41,9 @@ export default function SettingsPage() {
     }
   }, []);
 
-  const fetchImages = useCallback(async () => {
-    try {
-      const statuses = await getImageStatus();
-      setImages(statuses);
-    } catch (err) {
-      console.error("Failed to fetch image status:", err);
-    }
-  }, []);
-
   useEffect(() => {
     fetchSettings();
-    fetchImages();
-  }, [fetchSettings, fetchImages]);
+  }, [fetchSettings]);
 
   const dirty = JSON.stringify(configMap) !== JSON.stringify(savedConfig);
 
@@ -82,13 +54,11 @@ export default function SettingsPage() {
   const handleSave = async () => {
     setSaving(true);
     try {
-      const items: ConfigItem[] = Object.entries(configMap).map(
-        ([key, value]) => ({
-          key,
-          value,
-          encrypted: key.includes("api_key") || key.includes("token"),
-        })
-      );
+      const items: ConfigItem[] = Object.entries(configMap).map(([key, value]) => ({
+        key,
+        value,
+        encrypted: key.includes("api_key") || key.includes("token"),
+      }));
       await updateSettings(items);
       await fetchSettings();
     } catch (err) {
@@ -98,264 +68,151 @@ export default function SettingsPage() {
     }
   };
 
-  const handleTestAgent = async (agentType: AgentType) => {
-    const key = `agent-${agentType}`;
-    setTesting((prev) => ({ ...prev, [key]: true }));
-    setTestResults((prev) => ({ ...prev, [key]: null }));
-    try {
-      const result = await testAgent(agentType);
-      setTestResults((prev) => ({ ...prev, [key]: result }));
-    } catch (err) {
-      setTestResults((prev) => ({
-        ...prev,
-        [key]: { success: false, message: String(err) },
-      }));
-    } finally {
-      setTesting((prev) => ({ ...prev, [key]: false }));
-    }
-  };
-
-  const handleTestTool = async (tool: string) => {
-    const key = `tool-${tool}`;
-    setTesting((prev) => ({ ...prev, [key]: true }));
-    setTestResults((prev) => ({ ...prev, [key]: null }));
-    try {
-      const result = await testTool(tool);
-      setTestResults((prev) => ({ ...prev, [key]: result }));
-    } catch (err) {
-      setTestResults((prev) => ({
-        ...prev,
-        [key]: { success: false, message: String(err) },
-      }));
-    } finally {
-      setTesting((prev) => ({ ...prev, [key]: false }));
-    }
-  };
-
-  const handleBuildImages = async () => {
-    setBuilding(true);
-    try {
-      await buildImages();
-      // Poll for completion
-      const poll = setInterval(async () => {
-        const statuses = await getImageStatus();
-        setImages(statuses);
-        if (statuses.every((s) => s.ready)) {
-          clearInterval(poll);
-          setBuilding(false);
-        }
-      }, 5000);
-    } catch (err) {
-      console.error("Failed to start image build:", err);
-      setBuilding(false);
-    }
-  };
-
   if (loading) {
     return (
-      <div className="flex items-center justify-center py-20">
-        <div className="w-6 h-6 border-2 border-primary border-t-transparent rounded-full animate-spin" />
+      <div className="space-y-6 max-w-4xl">
+        <Skeleton className="h-10 w-32" />
+        <Card>
+          <CardHeader>
+            <Skeleton className="h-6 w-1/4 mb-2" />
+            <Skeleton className="h-4 w-1/2" />
+          </CardHeader>
+          <CardContent className="space-y-4">
+            <Skeleton className="h-10 w-full" />
+            <Skeleton className="h-10 w-full" />
+          </CardContent>
+        </Card>
       </div>
     );
   }
 
-  const allImagesReady = images.length > 0 && images.every((i) => i.ready);
-
   return (
-    <div className="max-w-3xl">
-      <div className="flex items-center justify-between mb-6">
+    <div className="space-y-8 max-w-4xl pb-10">
+      <div className="flex items-center justify-between sticky top-14 bg-background/95 backdrop-blur z-10 py-4 -my-4 border-b border-border/50">
         <div>
-          <h1 className="text-xl font-bold">Settings</h1>
-          <p className="text-sm text-text-secondary mt-1">
+          <h1 className="text-3xl font-bold tracking-tight">Settings</h1>
+          <p className="text-muted-foreground mt-1">
             Manage API keys and platform configuration
           </p>
         </div>
-        <button
+        <Button
           onClick={handleSave}
           disabled={!dirty || saving}
-          className="bg-primary hover:bg-primary-hover disabled:opacity-50 disabled:cursor-not-allowed text-white px-4 py-2 rounded-md text-sm font-medium transition-colors"
         >
+          {saving && <IconLoader2 className="w-4 h-4 mr-2 animate-spin" />}
           {saving ? "Saving..." : "Save Changes"}
-        </button>
+        </Button>
       </div>
 
-      {/* Docker Images */}
-      <section className="mb-8">
-        <h2 className="text-lg font-semibold mb-4">Agent Images</h2>
-        <div className="bg-bg-surface border border-border rounded-lg p-4">
-          <div className="space-y-2 mb-3">
-            {images.map((img) => (
-              <div
-                key={img.name}
-                className="flex items-center justify-between text-sm"
-              >
-                <span className="font-mono text-text-primary">{img.name}</span>
-                <span
-                  className={
-                    img.ready ? "text-green-400" : "text-red-400"
-                  }
-                >
-                  {img.ready ? "Ready" : "Not Built"}
-                </span>
-              </div>
-            ))}
-            {images.length === 0 && (
-              <p className="text-sm text-text-secondary">
-                Could not check image status. Is Docker running?
-              </p>
-            )}
+      <div className="grid gap-6 mt-6">
+        {/* Agent Configuration */}
+        <section className="space-y-4">
+          <div className="flex items-center gap-2 mb-2">
+            <IconRobot className="h-5 w-5 text-primary" />
+            <h2 className="text-xl font-semibold tracking-tight">Agent Configuration</h2>
           </div>
-          {!allImagesReady && (
-            <button
-              onClick={handleBuildImages}
-              disabled={building}
-              className="text-xs bg-primary hover:bg-primary-hover disabled:opacity-50 text-white px-3 py-1.5 rounded transition-colors"
-            >
-              {building ? "Building..." : "Build All Images"}
-            </button>
-          )}
-        </div>
-      </section>
+          <div className="grid gap-4 md:grid-cols-2">
+            {agents.map((agent) => {
+              const cfg = AGENT_CONFIG[agent.type];
+              if (!cfg) return null;
 
-      {/* Agent Configuration */}
-      <section className="mb-8">
-        <h2 className="text-lg font-semibold mb-4">Agent Configuration</h2>
-        <div className="grid gap-4">
-          {agents.map((agent) => {
-            const cfg = AGENT_CONFIG[agent.type];
-            if (!cfg) return null;
-            const testKey = `agent-${agent.type}`;
-            const result = testResults[testKey];
-            const isTesting = testing[testKey];
+              return (
+                <Card key={agent.type} className="flex flex-col">
+                  <CardHeader className="pb-3 flex-none">
+                    <div className="flex items-start justify-between">
+                      <div>
+                        <CardTitle className="text-lg flex items-center gap-2">
+                          {agent.name}
+                          {agent.installed ? (
+                            <Badge variant="outline" className="bg-green-500/10 text-green-600 dark:text-green-400 border-green-500/20">Installed</Badge>
+                          ) : (
+                            <Badge variant="outline" className="text-muted-foreground">Not Installed</Badge>
+                          )}
+                        </CardTitle>
+                      </div>
+                    </div>
+                  </CardHeader>
+                  <CardContent className="space-y-4 flex-1">
+                    <div className="space-y-3">
+                      <div className="space-y-1.5">
+                        <ConfigField
+                          label="Default Model"
+                          configKey={`${cfg.keyPrefix}.default_model`}
+                          value={configMap[`${cfg.keyPrefix}.default_model`] ?? ""}
+                          onChange={updateField}
+                          placeholder="e.g. sonnet, opus, o3"
+                        />
+                        <p className="text-xs text-muted-foreground">
+                          Model to use when not specified per-task
+                        </p>
+                      </div>
+                    </div>
+                  </CardContent>
+                </Card>
+              );
+            })}
+          </div>
+        </section>
 
-            return (
-              <div
-                key={agent.type}
-                className="bg-bg-surface border border-border rounded-lg p-4"
-              >
-                <div className="flex items-center justify-between mb-3">
-                  <div>
-                    <h3 className="font-medium">{agent.name}</h3>
-                    <p className="text-xs text-text-secondary">
-                      {agent.image}
-                    </p>
-                  </div>
-                  <button
-                    onClick={() => handleTestAgent(agent.type)}
-                    disabled={isTesting}
-                    className="text-xs border border-border px-3 py-1 rounded hover:bg-bg-surface-hover transition-colors disabled:opacity-50"
-                  >
-                    {isTesting ? "Testing..." : "Test Connection"}
-                  </button>
-                </div>
-
-                {result && (
-                  <div
-                    className={`text-xs px-3 py-2 rounded mb-3 ${
-                      result.success
-                        ? "bg-green-500/10 text-green-400"
-                        : "bg-red-500/10 text-red-400"
-                    }`}
-                  >
-                    {result.message}
-                  </div>
-                )}
-
-                <div className="grid gap-3">
-                  <ConfigField
-                    label="API Key"
-                    configKey={`${cfg.keyPrefix}.api_key`}
-                    value={configMap[`${cfg.keyPrefix}.api_key`] ?? ""}
-                    onChange={updateField}
-                    sensitive
-                  />
-                  {cfg.hasBaseUrl && (
-                    <ConfigField
-                      label="API Base URL"
-                      configKey={`${cfg.keyPrefix}.api_base_url`}
-                      value={
-                        configMap[`${cfg.keyPrefix}.api_base_url`] ?? ""
-                      }
-                      onChange={updateField}
-                      placeholder={
-                        agent.type === "codex"
-                          ? "https://api.openai.com"
-                          : "https://api.anthropic.com"
-                      }
-                    />
-                  )}
-                  <ConfigField
-                    label="Default Model"
-                    configKey={`${cfg.keyPrefix}.default_model`}
-                    value={
-                      configMap[`${cfg.keyPrefix}.default_model`] ?? ""
-                    }
-                    onChange={updateField}
-                    placeholder="Enter model name"
-                  />
+        {/* Tools Configuration */}
+        <section className="space-y-4">
+          <div className="flex items-center gap-2 mb-2">
+            <IconSettings className="h-5 w-5 text-primary" />
+            <h2 className="text-xl font-semibold tracking-tight">Tools</h2>
+          </div>
+          <Card>
+            <CardHeader className="pb-3">
+              <div className="flex items-start justify-between">
+                <div>
+                  <CardTitle className="text-lg flex items-center gap-2">
+                    <IconSearch className="h-4 w-4 text-muted-foreground" />
+                    Tavily Search
+                  </CardTitle>
+                  <CardDescription>Web search capability for agents</CardDescription>
                 </div>
               </div>
-            );
-          })}
-        </div>
-      </section>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              <div className="space-y-1.5">
+                <ConfigField
+                  label="API Key"
+                  configKey="tool.tavily.api_key"
+                  value={configMap["tool.tavily.api_key"] ?? ""}
+                  onChange={updateField}
+                  sensitive
+                />
+                <p className="text-xs text-muted-foreground">
+                  Optional — used by platform steward for web search
+                </p>
+              </div>
+            </CardContent>
+          </Card>
+        </section>
 
-      {/* Tool Configuration */}
-      <section className="mb-8">
-        <h2 className="text-lg font-semibold mb-4">Tools</h2>
-        <div className="bg-bg-surface border border-border rounded-lg p-4">
-          <div className="flex items-center justify-between mb-3">
-            <div>
-              <h3 className="font-medium">Tavily Search</h3>
-              <p className="text-xs text-text-secondary">
-                Web search for agents
-              </p>
-            </div>
-            <button
-              onClick={() => handleTestTool("tavily")}
-              disabled={testing["tool-tavily"]}
-              className="text-xs border border-border px-3 py-1 rounded hover:bg-bg-surface-hover transition-colors disabled:opacity-50"
-            >
-              {testing["tool-tavily"] ? "Testing..." : "Test"}
-            </button>
+        {/* Git Configuration */}
+        <section className="space-y-4">
+          <div className="flex items-center gap-2 mb-2">
+            <IconGitBranch className="h-5 w-5 text-primary" />
+            <h2 className="text-xl font-semibold tracking-tight">Git</h2>
           </div>
-
-          {testResults["tool-tavily"] && (
-            <div
-              className={`text-xs px-3 py-2 rounded mb-3 ${
-                testResults["tool-tavily"]!.success
-                  ? "bg-green-500/10 text-green-400"
-                  : "bg-red-500/10 text-red-400"
-              }`}
-            >
-              {testResults["tool-tavily"]!.message}
-            </div>
-          )}
-
-          <ConfigField
-            label="API Key"
-            configKey="tool.tavily.api_key"
-            value={configMap["tool.tavily.api_key"] ?? ""}
-            onChange={updateField}
-            sensitive
-          />
-        </div>
-      </section>
-
-      {/* Git Configuration */}
-      <section className="mb-8">
-        <h2 className="text-lg font-semibold mb-4">Git</h2>
-        <div className="bg-bg-surface border border-border rounded-lg p-4">
-          <h3 className="font-medium mb-3">GitHub</h3>
-          <ConfigField
-            label="Personal Access Token"
-            configKey="git.github_token"
-            value={configMap["git.github_token"] ?? ""}
-            onChange={updateField}
-            sensitive
-          />
-        </div>
-      </section>
+          <Card>
+            <CardContent className="pt-6">
+              <div className="space-y-1.5">
+                <ConfigField
+                  label="GitHub Personal Access Token"
+                  configKey="git.github_token"
+                  value={configMap["git.github_token"] ?? ""}
+                  onChange={updateField}
+                  sensitive
+                />
+                <p className="text-xs text-muted-foreground">
+                  Required for cloning private repos and pushing branches
+                </p>
+              </div>
+            </CardContent>
+          </Card>
+        </section>
+      </div>
     </div>
   );
 }
@@ -379,31 +236,33 @@ function ConfigField({
   const isMasked = sensitive && value.includes("***");
 
   return (
-    <div>
-      <label className="block text-xs text-text-secondary mb-1">
-        {label}
-      </label>
-      <div className="flex gap-2">
-        <input
+    <div className="space-y-1.5">
+      <Label htmlFor={configKey}>{label}</Label>
+      <div className="flex relative">
+        <Input
+          id={configKey}
           type={sensitive && !visible ? "password" : "text"}
           value={value}
           onChange={(e) => onChange(configKey, e.target.value)}
           placeholder={placeholder ?? (sensitive ? "Enter value..." : "")}
-          className="flex-1 bg-bg-primary border border-border rounded px-3 py-1.5 text-sm focus:outline-none focus:border-primary"
+          className={sensitive ? "pr-10" : ""}
         />
         {sensitive && (
-          <button
+          <Button
             type="button"
+            variant="ghost"
+            size="icon"
             onClick={() => setVisible(!visible)}
-            className="text-xs text-text-secondary hover:text-text-primary px-2"
+            className="absolute right-0 top-0 h-full text-muted-foreground hover:text-foreground px-3"
+            tabIndex={-1}
           >
-            {visible ? "Hide" : "Show"}
-          </button>
+            {visible ? <IconEyeOff className="h-4 w-4" /> : <IconEye className="h-4 w-4" />}
+          </Button>
         )}
       </div>
       {isMasked && (
-        <p className="text-xs text-text-secondary mt-1">
-          Value is saved. Enter a new value to replace it.
+        <p className="text-xs text-muted-foreground">
+          Value is saved and masked. Enter a new value to replace it.
         </p>
       )}
     </div>

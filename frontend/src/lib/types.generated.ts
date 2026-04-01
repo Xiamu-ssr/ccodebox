@@ -2,25 +2,46 @@
 // Re-generate: ./gen_types.sh ./bindings ../frontend/src/lib/types.generated.ts
 
 
-export type AgentInfo = { type: AgentType, name: string, image: string, };
+export type AgentInfo = { type: AgentType, name: string, installed: boolean, };
 
 
-export type AgentType = "claude_code" | "codex";
+export type AgentType = "claude-code" | "codex";
 
 
 export type ConfigItem = { key: string, value: string, encrypted: boolean, };
 
 
-export type CreateTaskRequest = { title: string, prompt: string, repo_url: string | null, branch: string | null, agent_type: AgentType | null, model: string | null, };
+export type CreateProjectRequest = { name: string, repo_url: string | null, local_path: string | null, default_agent: string | null, };
+
+
+export type CreateTaskRequest = { title: string, prompt: string, project_id: string | null, task_type: string | null, inputs: string | null, };
 
 
 export type CreateTaskResponse = { id: string, status: TaskStatus, created_at: string, };
 
 
+export type Project = { id: string, name: string, repo_url: string | null, local_path: string | null, default_agent: string | null, created_at: string, };
+
+
+export type ProjectListResponse = { projects: Array<Project>, };
+
+
+/**
+ * POST /api/run — 单次 stage 执行请求
+ */
+export type RunStageRequest = { project_id: string, agent_type: AgentType, prompt: string, model: string | null, };
+
+
 export type SettingsResponse = { agents: Array<AgentInfo>, default_model: string, config: Array<ConfigItem>, };
 
 
-export type Task = { id: string, title: string, prompt: string, repo_url: string | null, branch: string | null, agent_type: AgentType, model: string, status: TaskStatus, container_id: string | null, agent_exit_code: number | null, duration_seconds: number | null, pushed: boolean, lines_added: number, lines_removed: number, files_changed: string | null, summary: string | null, diff_patch: string | null, error: string | null, created_at: string, started_at: string | null, finished_at: string | null, };
+export type StageRun = { id: string, task_id: string, stage_name: string, run_number: number, agent_type: string, status: StageRunStatus, workspace_path: string | null, branch: string | null, agent_exit_code: number | null, prompt_used: string | null, agent_log: string | null, diff_patch: string | null, summary: string | null, error_report: string | null, duration_seconds: number | null, created_at: string, finished_at: string | null, };
+
+
+export type StageRunStatus = "pending" | "running" | "success" | "failed";
+
+
+export type Task = { id: string, title: string, prompt: string, project_id: string | null, task_type: string, inputs: string | null, current_stage: string | null, status: TaskStatus, error: string | null, created_at: string, started_at: string | null, finished_at: string | null, };
 
 
 export type TaskListResponse = { tasks: Array<Task>, total: number, };
@@ -30,6 +51,27 @@ export type TaskLogsResponse = { logs: string, };
 
 
 export type TaskStatus = "pending" | "running" | "success" | "failed" | "cancelled";
+
+
+export type TaskTypeInfo = { name: string, description: string, inputs: Array<TaskTypeInput>, };
+
+
+export type TaskTypeInput = { name: string, description: string, required: boolean, default: string | null, };
+
+
+export type TaskTypeListResponse = { task_types: Array<TaskTypeInfo>, };
+
+
+export type Template = { id: string, name: string, description: string, definition: string, builtin: boolean, created_at: string, updated_at: string, };
+
+
+export type TemplateListResponse = { templates: Array<Template>, };
+
+
+export type CreateTemplateRequest = { name: string, description: string, definition: string, };
+
+
+export type UpdateTemplateRequest = { description: string | null, definition: string | null, };
 
 
 export type TestResult = { success: boolean, message: string, };

@@ -175,6 +175,11 @@ impl StageExecutor {
             }
         };
 
+        // 保存 PID 到 DB（用于取消时 kill）
+        if let Some(pid) = handle.child.id() {
+            let _ = self.db.update_stage_run_pid(&stage_run_id, pid as i32).await;
+        }
+
         // 9. 等待 agent 完成
         let status = handle.child.wait().await?;
         let duration = start.elapsed().as_secs() as i32;

@@ -46,6 +46,9 @@ pub struct Model {
     /// git 分支名（如果 needs_branch）
     pub branch: Option<String>,
 
+    /// agent 进程 PID（用于取消时 kill）
+    pub agent_pid: Option<i32>,
+
     /// 实际发给 agent 的 prompt
     #[sea_orm(column_type = "Text", nullable)]
     pub prompt_used: Option<String>,
