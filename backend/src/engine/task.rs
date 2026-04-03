@@ -248,11 +248,10 @@ impl TaskOrchestrator {
         let mut parts = Vec::new();
         parts.push(format!("## Context from stage '{from_stage}'"));
 
-        // Don't embed the diff — the agent is already in the worktree and can inspect it directly
+        // Don't embed the diff — the agent is in the worktree and can inspect it directly
         parts.push(
-            "### Changes\nThe previous stage made code changes in this workspace. \
-             Use `git diff HEAD~1` to see the full diff, or `git log --oneline -5` for recent commits. \
-             Inspect the actual files directly as needed."
+            "### Changes\nThe previous stage has made code changes in this workspace. \
+             Run `git diff HEAD~1` to see what was changed, or `git log --oneline -5` for recent commits."
                 .to_string(),
         );
 
