@@ -232,10 +232,6 @@ impl TaskOrchestrator {
     }
 
     /// 从上游 stage 的最近一次成功 run 构建 context
-    /// Max diff size to include in downstream context (100KB).
-    /// Larger diffs get summarized as file list only.
-    const MAX_CONTEXT_DIFF_BYTES: usize = 100 * 1024;
-
     async fn build_context_from(&self, task_id: &str, from_stage: &str) -> Result<String> {
         let runs = self.db.list_stage_runs_by_task(task_id).await?;
 
@@ -252,36 +248,14 @@ impl TaskOrchestrator {
         let mut parts = Vec::new();
         parts.push(format!("## Context from stage '{from_stage}'"));
 
-        if let Some(diff) = &sr.diff_patch {
-            if !diff.is_empty() {
-                if diff.len() <= Self::MAX_CONTEXT_DIFF_BYTES {
-                    // Small enough to include in full
-                    parts.push(format!("### Diff\n```diff\n{diff}\n```"));
-                } else {
-                    // Too large — extract file list and include summary instead
-                    let file_list: Vec<&str> = diff
-                        .lines()
-                        .filter(|l| l.starts_with("diff --git"))
-                        .map(|l| {
-                            // "diff --git a/path b/path" → "path"
-                            l.split(" b/").last().unwrap_or(l)
-                        })
-                        .collect();
-                    let file_count = file_list.len();
-                    // Show first 50 files max
-                    let shown: Vec<&str> = file_list.iter().take(50).copied().collect();
-                    let truncation_note = if file_count > 50 {
-                        format!("\n... and {} more files", file_count - 50)
-                    } else {
-                        String::new()
-                    };
-                    parts.push(format!(
-                        "### Changed Files ({file_count} files, diff too large to include)\n```\n{}{truncation_note}\n```\n\n_The full diff is available in the workspace. Use `git diff HEAD~1` to inspect specific files._",
-                        shown.join("\n")
-                    ));
-                }
-            }
-        }
+        // Don't embed the diff — the agent is already in the worktree and can inspect it directly
+        parts.push(
+            "### Changes\nThe previous stage made code changes in this workspace. \
+             Use `git diff HEAD~1` to see the full diff, or `git log --oneline -5` for recent commits. \
+             Inspect the actual files directly as needed."
+                .to_string(),
+        );
+
         if let Some(summary) = &sr.summary {
             if !summary.is_empty() {
                 parts.push(format!("### Summary\n{summary}"));
