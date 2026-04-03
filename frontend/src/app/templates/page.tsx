@@ -47,10 +47,10 @@ import {
 import { cn } from "@/lib/utils";
 
 const TEMPLATE_FORM_DIALOG_CLASSNAME =
-  "grid h-[min(94vh,54rem)] w-[min(96vw,88rem)] max-w-[min(96vw,88rem)] grid-rows-[auto_minmax(0,1fr)] gap-0 overflow-hidden p-0";
+  "grid h-[min(94vh,54rem)] w-[min(96vw,88rem)] max-w-[min(96vw,88rem)] sm:max-w-[min(96vw,88rem)] grid-rows-[auto_minmax(0,1fr)] gap-0 overflow-hidden p-0";
 
 const TEMPLATE_VIEW_DIALOG_CLASSNAME =
-  "grid h-[min(94vh,52rem)] w-[min(96vw,84rem)] max-w-[min(96vw,84rem)] grid-rows-[auto_minmax(0,1fr)] gap-0 overflow-hidden p-0";
+  "grid h-[min(94vh,52rem)] w-[min(96vw,84rem)] max-w-[min(96vw,84rem)] sm:max-w-[min(96vw,84rem)] grid-rows-[auto_minmax(0,1fr)] gap-0 overflow-hidden p-0";
 
 export default function TemplatesPage() {
   const [templates, setTemplates] = useState<Template[]>([]);

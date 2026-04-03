@@ -28,6 +28,7 @@ dist/
 .vscode/
 .idea/
 .claude/
+.playwright-mcp/
 
 # macOS
 .DS_Store

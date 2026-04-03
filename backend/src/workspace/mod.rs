@@ -29,28 +29,39 @@ impl WorkspaceManager {
             .join("workspaces")
     }
 
-    /// 为 stage run 创建工作目录
+    /// 为 stage run 创建或复用工作目录
     ///
-    /// needs_branch=true → git worktree add（基于 repo_path）
-    /// needs_branch=false → 创建普通目录
+    /// 一个 task 只有一个 worktree，所有 stage run 共享。
+    /// 首次调用（needs_branch=true 的 stage）创建 git worktree。
+    /// 后续调用（needs_branch=false 的 stage 或重试）复用已有目录。
     pub async fn create_workspace(
         &self,
         project_name: &str,
         task_id: &str,
-        stage_name: &str,
-        run_number: i32,
+        _stage_name: &str,
+        _run_number: i32,
         repo_path: &Path,
         needs_branch: bool,
     ) -> Result<WorkspaceInfo> {
-        let dir_name = format!("{task_id}--{stage_name}--{run_number}");
-        let workspace_path = self.base_dir.join(project_name).join(&dir_name);
+        // Task-level workspace: one directory per task, not per stage run
+        let workspace_path = self.base_dir.join(project_name).join(task_id);
+        let branch_name = format!("ccodebox/{task_id}");
 
-        tokio::fs::create_dir_all(&workspace_path)
-            .await
-            .context("创建工作目录失败")?;
+        if workspace_path.exists() {
+            // Worktree already exists from a previous stage or retry — reuse it
+            // Check if it's a valid git worktree
+            let is_git = workspace_path.join(".git").exists();
+            return Ok(WorkspaceInfo {
+                path: workspace_path,
+                branch: if is_git { Some(branch_name) } else { None },
+            });
+        }
 
         if needs_branch {
-            let branch_name = format!("ccodebox/{task_id}");
+            // First stage: create git worktree with new branch
+            tokio::fs::create_dir_all(workspace_path.parent().unwrap())
+                .await
+                .context("创建项目工作目录失败")?;
 
             let output = tokio::process::Command::new("git")
                 .args([
@@ -75,6 +86,12 @@ impl WorkspaceManager {
                 branch: Some(branch_name),
             })
         } else {
+            // needs_branch=false but no existing worktree — shouldn't happen
+            // in normal flow, but create a plain directory as fallback
+            tokio::fs::create_dir_all(&workspace_path)
+                .await
+                .context("创建工作目录失败")?;
+
             Ok(WorkspaceInfo {
                 path: workspace_path,
                 branch: None,
@@ -221,11 +238,8 @@ mod tests {
 
         assert!(info.path.exists());
         assert!(info.branch.is_none());
-        assert!(info
-            .path
-            .to_str()
-            .unwrap()
-            .contains("t001--coding--1"));
+        // Task-level workspace: path ends with task_id, not stage--run
+        assert!(info.path.to_str().unwrap().contains("t001"));
     }
 
     #[tokio::test]
@@ -246,6 +260,38 @@ mod tests {
 
         // 验证 worktree 中有文件
         assert!(info.path.join("README.md").exists());
+    }
+
+    #[tokio::test]
+    async fn reuse_workspace_across_stages() {
+        let base = TempDir::new().unwrap();
+        let repo = TempDir::new().unwrap();
+        setup_git_repo(repo.path()).await;
+
+        let mgr = WorkspaceManager::new(base.path().to_path_buf());
+
+        // coding stage 1: creates worktree
+        let ws1 = mgr
+            .create_workspace("proj", "task-1", "coding", 1, repo.path(), true)
+            .await
+            .unwrap();
+        assert!(ws1.path.join("README.md").exists());
+
+        // testing stage 1: reuses same worktree
+        let ws2 = mgr
+            .create_workspace("proj", "task-1", "testing", 1, repo.path(), false)
+            .await
+            .unwrap();
+        assert_eq!(ws1.path, ws2.path);
+        assert!(ws2.path.join("README.md").exists());
+
+        // coding stage 2 (retry): still reuses same worktree
+        let ws3 = mgr
+            .create_workspace("proj", "task-1", "coding", 2, repo.path(), true)
+            .await
+            .unwrap();
+        assert_eq!(ws1.path, ws3.path);
+        assert!(ws3.branch.is_some());
     }
 
     #[tokio::test]
