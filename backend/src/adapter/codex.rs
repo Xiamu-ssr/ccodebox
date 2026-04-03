@@ -6,6 +6,9 @@ use super::{AgentAdapter, AgentHandle, AgentRequest};
 
 pub struct CodexAdapter;
 
+/// Max prompt length that can safely fit in a CLI argument.
+const MAX_CLI_ARG_BYTES: usize = 512 * 1024; // 512KB
+
 #[async_trait]
 impl AgentAdapter for CodexAdapter {
     async fn execute(&self, req: AgentRequest) -> Result<AgentHandle> {
@@ -14,7 +17,16 @@ impl AgentAdapter for CodexAdapter {
         if let Some(model) = &req.model {
             cmd.args(["-c", &format!("model=\"{model}\"")]);
         }
-        cmd.arg(&req.prompt);
+
+        // If prompt is too large for CLI arg, write to file and instruct agent to read it
+        if req.prompt.len() > MAX_CLI_ARG_BYTES {
+            let prompt_path = req.working_dir.join(".ccodebox-prompt.md");
+            std::fs::write(&prompt_path, &req.prompt)?;
+            cmd.arg("Read and follow ALL instructions in .ccodebox-prompt.md — that file contains your complete task specification.");
+        } else {
+            cmd.arg(&req.prompt);
+        }
+
         cmd.current_dir(&req.working_dir);
         cmd.envs(&req.env);
 

@@ -82,8 +82,28 @@ impl WorkspaceManager {
         }
     }
 
-    /// 收集工作目录中的 git diff
+    /// 收集工作目录中的 git diff（排除构建产物和日志）
     pub async fn collect_diff(workspace_path: &Path) -> Result<Option<String>> {
+        // Ensure .gitignore exists in worktree to exclude build artifacts
+        let gitignore_path = workspace_path.join(".gitignore");
+        if !gitignore_path.exists() {
+            let _ = tokio::fs::write(
+                &gitignore_path,
+                "# CCodeBoX auto-generated\ntarget/\nnode_modules/\n.next/\ndist/\nbuild/\n*.log\n.ccodebox-agent.log\n.ccodebox-prompt.md\n",
+            )
+            .await;
+        } else {
+            // Append our exclusions if not already present
+            let content = tokio::fs::read_to_string(&gitignore_path).await.unwrap_or_default();
+            if !content.contains(".ccodebox-agent.log") {
+                let _ = tokio::fs::write(
+                    &gitignore_path,
+                    format!("{content}\n# CCodeBoX\n.ccodebox-agent.log\n.ccodebox-prompt.md\n"),
+                )
+                .await;
+            }
+        }
+
         let output = tokio::process::Command::new("git")
             .args(["add", "-A"])
             .current_dir(workspace_path)
@@ -95,7 +115,12 @@ impl WorkspaceManager {
         }
 
         let output = tokio::process::Command::new("git")
-            .args(["diff", "--cached"])
+            .args([
+                "diff", "--cached",
+                // Exclude known build artifact dirs as safety net
+                "--", ".", ":(exclude)target", ":(exclude)node_modules",
+                ":(exclude).next", ":(exclude)dist", ":(exclude)build",
+            ])
             .current_dir(workspace_path)
             .output()
             .await?;
@@ -240,6 +265,25 @@ mod tests {
     async fn collect_diff_no_changes() {
         let repo = TempDir::new().unwrap();
         setup_git_repo(repo.path()).await;
+
+        // Pre-create the .gitignore that collect_diff would auto-create, and commit it
+        std::fs::write(
+            repo.path().join(".gitignore"),
+            "# CCodeBoX auto-generated\ntarget/\nnode_modules/\n.next/\ndist/\nbuild/\n*.log\n.ccodebox-agent.log\n.ccodebox-prompt.md\n",
+        )
+        .unwrap();
+        tokio::process::Command::new("git")
+            .args(["add", "-A"])
+            .current_dir(repo.path())
+            .output()
+            .await
+            .unwrap();
+        tokio::process::Command::new("git")
+            .args(["commit", "-m", "add gitignore"])
+            .current_dir(repo.path())
+            .output()
+            .await
+            .unwrap();
 
         let diff = WorkspaceManager::collect_diff(repo.path()).await.unwrap();
         assert!(diff.is_none());
